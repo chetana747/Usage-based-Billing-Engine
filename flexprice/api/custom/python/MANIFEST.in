@@ -1,3 +1,0 @@
-# Include examples folder and all its contents
-graft examples
-include README.md
