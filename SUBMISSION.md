@@ -1,5 +1,5 @@
-Team ID:  [YOUR-TEAM-ID]
-Team:     [YOUR-TEAM-NAME]
+Team ID:  [DBG-249]
+Team:     [LOCKIN]
 Card:     Usage-Based Metering & Billing Engine (Flexprice Rebuild)
 Original: https://github.com/flexprice/flexprice
 Commit studied: main (release v2.0.3)
