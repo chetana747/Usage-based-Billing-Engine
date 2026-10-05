@@ -1,0 +1,314 @@
+package types
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	cockroachErrors "github.com/cockroachdb/errors"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func validAddAddonRef() AddAddonRef {
+	return AddAddonRef{
+		AssociationID:     "addon_assoc_123",
+		AddonID:           "addon_123",
+		Cadence:           AddonCadenceRecurring,
+		ProrationBehavior: ProrationBehaviorCreateProrations,
+		StartDate:         time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+func validRemoveAddonRef() RemoveAddonRef {
+	return RemoveAddonRef{
+		AssociationID:     "addon_assoc_456",
+		Reason:            "downgrade",
+		ProrationBehavior: ProrationBehaviorCreateProrations,
+		EffectiveDate:     time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+func TestAddAddonParams_Validate(t *testing.T) {
+	withRef := func(mutate func(*AddAddonRef)) *AddAddonParams {
+		ref := validAddAddonRef()
+		mutate(&ref)
+		return &AddAddonParams{SubscriptionID: "subs_123", Addons: []AddAddonRef{ref}}
+	}
+	withRemove := func(mutate func(*RemoveAddonRef)) *AddAddonParams {
+		ref := validRemoveAddonRef()
+		mutate(&ref)
+		return &AddAddonParams{
+			SubscriptionID: "subs_123",
+			Addons:         []AddAddonRef{validAddAddonRef()},
+			Removes:        []RemoveAddonRef{ref},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		params  *AddAddonParams
+		wantErr bool
+	}{
+		{
+			name:    "nil params",
+			params:  nil,
+			wantErr: true,
+		},
+		{
+			name:    "valid single addon",
+			params:  withRef(func(*AddAddonRef) {}),
+			wantErr: false,
+		},
+		{
+			// Unset proration_behavior is legal: it mirrors the pay-later path, where an
+			// unset behavior means no partial-period charge rather than an invalid request.
+			name:    "valid with unset proration behavior",
+			params:  withRef(func(r *AddAddonRef) { r.ProrationBehavior = "" }),
+			wantErr: false,
+		},
+		{
+			name:    "valid onetime cadence",
+			params:  withRef(func(r *AddAddonRef) { r.Cadence = AddonCadenceOnetime }),
+			wantErr: false,
+		},
+		{
+			name:    "empty subscription id",
+			params:  &AddAddonParams{SubscriptionID: "", Addons: []AddAddonRef{validAddAddonRef()}},
+			wantErr: true,
+		},
+		{
+			name:    "zero addons",
+			params:  &AddAddonParams{SubscriptionID: "subs_123", Addons: nil},
+			wantErr: true,
+		},
+		{
+			// The blob is list-shaped so batching is additive; completion loops the list.
+			name: "multiple addons allowed",
+			params: &AddAddonParams{
+				SubscriptionID: "subs_123",
+				Addons:         []AddAddonRef{validAddAddonRef(), validAddAddonRef()},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "empty association id",
+			params:  withRef(func(r *AddAddonRef) { r.AssociationID = "" }),
+			wantErr: true,
+		},
+		{
+			name:    "empty addon id",
+			params:  withRef(func(r *AddAddonRef) { r.AddonID = "" }),
+			wantErr: true,
+		},
+		{
+			name:    "empty cadence",
+			params:  withRef(func(r *AddAddonRef) { r.Cadence = "" }),
+			wantErr: true,
+		},
+		{
+			name:    "invalid cadence",
+			params:  withRef(func(r *AddAddonRef) { r.Cadence = "quarterly" }),
+			wantErr: true,
+		},
+		{
+			name:    "invalid proration behavior",
+			params:  withRef(func(r *AddAddonRef) { r.ProrationBehavior = "always" }),
+			wantErr: true,
+		},
+		{
+			// A zero start date would replay as time.Now() and rebuild line items for a
+			// different day than the draft invoice was priced for.
+			name:    "zero start date",
+			params:  withRef(func(r *AddAddonRef) { r.StartDate = time.Time{} }),
+			wantErr: true,
+		},
+		{
+			name:    "nil removes stays valid",
+			params:  &AddAddonParams{SubscriptionID: "subs_123", Addons: []AddAddonRef{validAddAddonRef()}, Removes: nil},
+			wantErr: false,
+		},
+		{
+			name:    "valid add and remove",
+			params:  withRemove(func(*RemoveAddonRef) {}),
+			wantErr: false,
+		},
+		{
+			name:    "valid remove with unset proration behavior",
+			params:  withRemove(func(r *RemoveAddonRef) { r.ProrationBehavior = "" }),
+			wantErr: false,
+		},
+		{
+			name:    "valid remove with no reason",
+			params:  withRemove(func(r *RemoveAddonRef) { r.Reason = "" }),
+			wantErr: false,
+		},
+		{
+			// A pay-first session exists because the net is positive, which needs an add.
+			name: "removes without adds rejected",
+			params: &AddAddonParams{
+				SubscriptionID: "subs_123",
+				Removes:        []RemoveAddonRef{validRemoveAddonRef()},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "remove with empty association id",
+			params:  withRemove(func(r *RemoveAddonRef) { r.AssociationID = "" }),
+			wantErr: true,
+		},
+		{
+			name:    "remove with invalid proration behavior",
+			params:  withRemove(func(r *RemoveAddonRef) { r.ProrationBehavior = "always" }),
+			wantErr: true,
+		},
+		{
+			// A zero date would replay as time.Now(), against a different window than the draft.
+			name:    "remove with zero effective date",
+			params:  withRemove(func(r *RemoveAddonRef) { r.EffectiveDate = time.Time{} }),
+			wantErr: true,
+		},
+		{
+			name: "duplicate remove association id rejected",
+			params: &AddAddonParams{
+				SubscriptionID: "subs_123",
+				Addons:         []AddAddonRef{validAddAddonRef()},
+				Removes:        []RemoveAddonRef{validRemoveAddonRef(), validRemoveAddonRef()},
+			},
+			wantErr: true,
+		},
+		{
+			name: "multiple distinct removes allowed",
+			params: &AddAddonParams{
+				SubscriptionID: "subs_123",
+				Addons:         []AddAddonRef{validAddAddonRef()},
+				Removes: []RemoveAddonRef{
+					validRemoveAddonRef(),
+					func() RemoveAddonRef {
+						r := validRemoveAddonRef()
+						r.AssociationID = "addon_assoc_789"
+						return r
+					}(),
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.params.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.True(t, ierr.IsValidation(err), "expected a validation error, got %v", err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// CheckoutConfiguration.Validate defaults unknown actions to nil, so a missing add_addon
+// case would silently pass every malformed session through.
+func TestCheckoutConfiguration_Validate_AddAddon(t *testing.T) {
+	t.Run("missing params rejected", func(t *testing.T) {
+		cfg := &CheckoutConfiguration{}
+		err := cfg.Validate(CheckoutActionAddAddon)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "add_addon_params")
+	})
+
+	t.Run("invalid params propagate", func(t *testing.T) {
+		cfg := &CheckoutConfiguration{
+			AddAddonParams: &AddAddonParams{SubscriptionID: "", Addons: []AddAddonRef{validAddAddonRef()}},
+		}
+		assert.Error(t, cfg.Validate(CheckoutActionAddAddon))
+	})
+
+	t.Run("valid params accepted", func(t *testing.T) {
+		cfg := &CheckoutConfiguration{
+			AddAddonParams: &AddAddonParams{
+				SubscriptionID: "subs_123",
+				Addons:         []AddAddonRef{validAddAddonRef()},
+			},
+		}
+		assert.NoError(t, cfg.Validate(CheckoutActionAddAddon))
+	})
+}
+
+func TestCheckoutAction_Validate_AddAddon(t *testing.T) {
+	assert.NoError(t, CheckoutActionAddAddon.Validate())
+	assert.Equal(t, "add_addon", CheckoutActionAddAddon.String())
+
+	// The hint listing the allowed values is a hardcoded literal, not a render of the
+	// `allowed` slice, so it drifts silently unless something checks it.
+	err := CheckoutAction("not_an_action").Validate()
+	assert.Error(t, err)
+	hints := cockroachErrors.GetAllHints(err)
+	assert.NotEmpty(t, hints)
+	assert.Contains(t, hints[0], "add_addon",
+		"the hardcoded allowed-values hint must list every CheckoutAction constant")
+}
+
+// A caller that knows only the payment id must not erase the redirect action and
+// provider handle recorded at link creation — that is the whole reason completion
+// builds on the stored value instead of overwriting it.
+func TestCheckoutProviderResultBuilder_OverlayKeepsWhatTheCallerDoesNotKnow(t *testing.T) {
+	expires := time.Now().UTC()
+	stored := &CheckoutProviderResult{
+		NextAction:        &PaymentAction{Type: PaymentActionTypePaymentLink, URL: "https://rzp.io/x"},
+		ProviderSessionID: "plink_1",
+		ExpiresAt:         &expires,
+		ProviderMetadata:  map[string]string{"created_by": "link"},
+	}
+
+	got := NewCheckoutProviderResultFrom(stored).
+		Overlay(&CheckoutProviderResult{ProviderPaymentIntentID: "pay_1"}).
+		Build()
+
+	require.NotNil(t, got)
+	assert.Equal(t, "pay_1", got.ProviderPaymentIntentID, "the fragment is applied")
+	assert.Equal(t, "plink_1", got.ProviderSessionID, "and the rest survives")
+	require.NotNil(t, got.NextAction)
+	assert.Equal(t, "https://rzp.io/x", got.NextAction.URL)
+	assert.Equal(t, &expires, got.ExpiresAt)
+	assert.Equal(t, "link", got.ProviderMetadata["created_by"])
+}
+
+// The built value is persisted, so it must not alias the caller's map.
+func TestCheckoutProviderResultBuilder_DoesNotAliasTheBase(t *testing.T) {
+	stored := &CheckoutProviderResult{ProviderMetadata: map[string]string{"k": "v"}}
+
+	got := NewCheckoutProviderResultFrom(stored).
+		Overlay(&CheckoutProviderResult{ProviderMetadata: map[string]string{"k2": "v2"}}).
+		Build()
+
+	assert.Equal(t, map[string]string{"k": "v"}, stored.ProviderMetadata, "the base is untouched")
+	assert.Equal(t, map[string]string{"k": "v", "k2": "v2"}, got.ProviderMetadata)
+}
+
+func TestCheckoutProviderResultBuilder_NilHandling(t *testing.T) {
+	assert.NotNil(t, NewCheckoutProviderResultFrom(nil).Build(), "a nil base starts empty")
+
+	stored := &CheckoutProviderResult{ProviderSessionID: "plink_1"}
+	got := NewCheckoutProviderResultFrom(stored).Overlay(nil).Build()
+	assert.Equal(t, "plink_1", got.ProviderSessionID, "a nil overlay changes nothing")
+
+	var b *CheckoutProviderResultBuilder
+	assert.Nil(t, b.Build())
+}
+
+// Sessions persisted before removes existed must still unmarshal and validate.
+func TestAddAddonParams_LegacyJSONRoundTrip(t *testing.T) {
+	legacy := `{"subscription_id":"subs_123","addons":[{"association_id":"addon_assoc_123","addon_id":"addon_123","cadence":"recurring","proration_behavior":"create_prorations","start_date":"2026-08-05T00:00:00Z"}]}`
+
+	var params AddAddonParams
+	require.NoError(t, json.Unmarshal([]byte(legacy), &params))
+	assert.Nil(t, params.Removes)
+	assert.NoError(t, params.Validate())
+
+	out, err := json.Marshal(&params)
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "removes")
+}

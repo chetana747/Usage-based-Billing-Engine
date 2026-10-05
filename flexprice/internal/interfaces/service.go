@@ -1,0 +1,326 @@
+package interfaces
+
+import (
+	"context"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/api/dto"
+	"github.com/flexprice/flexprice/internal/domain/invoice"
+	"github.com/flexprice/flexprice/internal/domain/subscription"
+	"github.com/flexprice/flexprice/internal/domain/wallet"
+	"github.com/flexprice/flexprice/internal/postgres"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/shopspring/decimal"
+)
+
+// CustomerService defines the interface for customer operations
+type CustomerService interface {
+	CreateCustomer(ctx context.Context, req dto.CreateCustomerRequest) (*dto.CustomerResponse, error)
+	GetCustomer(ctx context.Context, id string) (*dto.CustomerResponse, error)
+	GetCustomers(ctx context.Context, filter *types.CustomerFilter) (*dto.ListCustomersResponse, error)
+	UpdateCustomer(ctx context.Context, id string, req dto.UpdateCustomerRequest) (*dto.CustomerResponse, error)
+	DeleteCustomer(ctx context.Context, id string) error
+	GetCustomerByLookupKey(ctx context.Context, lookupKey string) (*dto.CustomerResponse, error)
+
+	// Credit grant applications
+	GetUpcomingCreditGrantApplications(ctx context.Context, customerID string) (*dto.ListCreditGrantApplicationsResponse, error)
+}
+
+// PaymentService defines the interface for payment operations
+type PaymentService interface {
+	CreatePayment(ctx context.Context, req *dto.CreatePaymentRequest) (*dto.PaymentResponse, error)
+	GetPayment(ctx context.Context, id string) (*dto.PaymentResponse, error)
+	ListPayments(ctx context.Context, filter *types.PaymentFilter) (*dto.ListPaymentsResponse, error)
+	UpdatePayment(ctx context.Context, id string, req dto.UpdatePaymentRequest) (*dto.PaymentResponse, error)
+	DeletePayment(ctx context.Context, id string) error
+	GetPaymentByGatewayTrackingID(ctx context.Context, gatewayTrackingID, gateway string) (*dto.PaymentResponse, error)
+	PaymentExistsByGatewayPaymentID(ctx context.Context, gatewayPaymentID string) (bool, error)
+	// RecordAttempt appends the gateway's outcome for one charge attempt, leaving the
+	// parent payment's status untouched.
+	RecordAttempt(ctx context.Context, paymentID string, req dto.RecordAttemptRequest) error
+	// CreatePaymentForCheckout creates a minimal INITIATED payment record for a checkout
+	// session without triggering payment lifecycle processing.
+	// TODO: migrate to full payment lifecycle method when payment lifecycle service is released
+	CreatePaymentForCheckout(ctx context.Context, req *dto.CreateCheckoutPaymentRequest) (*dto.PaymentResponse, error)
+	ListPaymentMethods(ctx context.Context, customerID string, req *dto.ListSavedPaymentMethodsRequest) (*dto.SavedPaymentMethodsResponse, error)
+}
+
+// InvoiceService defines the interface for invoice operations
+type InvoiceService interface {
+	CreateInvoice(ctx context.Context, req dto.CreateInvoiceRequest) (*dto.InvoiceResponse, error)
+	CreateEmptyDraftInvoice(ctx context.Context, req dto.CreateDraftInvoiceRequest) (*dto.InvoiceResponse, error)
+	ComputeInvoice(ctx context.Context, invoiceID string, req *dto.InvoiceComputeRequest) (*invoice.Invoice, bool, error)
+	FinalizeInvoice(ctx context.Context, id string, req dto.FinalizeInvoiceRequest) error
+	GetInvoice(ctx context.Context, id string) (*dto.InvoiceResponse, error)
+	ListInvoices(ctx context.Context, filter *types.InvoiceFilter) (*dto.ListInvoicesResponse, error)
+	UpdateInvoice(ctx context.Context, id string, req dto.UpdateInvoiceRequest) (*dto.InvoiceResponse, error)
+	DeleteInvoice(ctx context.Context, id string) error
+	ReconcilePaymentStatus(ctx context.Context, invoiceID string, paymentStatus types.PaymentStatus, paymentAmount *decimal.Decimal) error
+
+	ApplyExternalInvoiceDiscount(ctx context.Context, invoiceID string, req dto.ApplyExternalInvoiceDiscountRequest) error
+	// VoidInvoice voids the invoice and returns its updated (voided) state.
+	VoidInvoice(ctx context.Context, id string, req dto.InvoiceVoidRequest) (*invoice.Invoice, error)
+}
+
+type PlanService interface {
+	CreatePlan(ctx context.Context, req dto.CreatePlanRequest) (*dto.CreatePlanResponse, error)
+	GetPlan(ctx context.Context, id string) (*dto.PlanResponse, error)
+	GetPlans(ctx context.Context, filter *types.PlanFilter) (*dto.ListPlansResponse, error)
+	UpdatePlan(ctx context.Context, id string, req dto.UpdatePlanRequest) (*dto.PlanResponse, error)
+	DeletePlan(ctx context.Context, id string) error
+	ClonePlan(ctx context.Context, id string, req dto.ClonePlanRequest) (*dto.PlanResponse, error)
+	SyncPlanPrices(ctx context.Context, id string) (*dto.SyncPlanPricesResponse, error)
+	SyncPlanPricesV2(ctx context.Context, id string) (*dto.SyncPlanPricesResponse, error)
+}
+
+type EntityIntegrationMappingService interface {
+	CreateEntityIntegrationMapping(ctx context.Context, req dto.CreateEntityIntegrationMappingRequest) (*dto.EntityIntegrationMappingResponse, error)
+	GetEntityIntegrationMapping(ctx context.Context, id string) (*dto.EntityIntegrationMappingResponse, error)
+	GetEntityIntegrationMappings(ctx context.Context, filter *types.EntityIntegrationMappingFilter) (*dto.ListEntityIntegrationMappingsResponse, error)
+	UpdateEntityIntegrationMapping(ctx context.Context, id string, req dto.UpdateEntityIntegrationMappingRequest) (*dto.EntityIntegrationMappingResponse, error)
+	DeleteEntityIntegrationMapping(ctx context.Context, id string) error
+	LinkIntegrationMapping(ctx context.Context, req dto.LinkIntegrationMappingRequest) (*dto.LinkIntegrationMappingResponse, error)
+	DelinkIntegrationMapping(ctx context.Context, req dto.DelinkIntegrationMappingRequest) (*dto.SuccessResponse, error)
+}
+
+// RevenueService writes and maintains revenue_facts rows and serves their
+// analytics reads. Implemented by internal/ee/service/revenue; declared here
+// so the service layer can invoke the invoice-side hooks without importing
+// the implementation package.
+type RevenueService interface {
+	// RollupSubscription splits the subscription's current billing period
+	// into PROVISIONAL revenue_facts rows.
+	RollupSubscription(ctx context.Context, subscriptionID string) error
+
+	// RollupDirty rolls every opted-in subscription with activity since the
+	// given time. Over-rolling is harmless: the upsert is idempotent.
+	RollupDirty(ctx context.Context, req types.RollupDirtyRequest) (types.RollupDirtyResult, error)
+
+	// FinalizeSubscriptionPeriod flips the invoice's PROVISIONAL rows to
+	// FINAL and stamps them with the invoice.
+	FinalizeSubscriptionPeriod(ctx context.Context, invoiceID string) error
+
+	// RevertInvoiceFacts writes a negating twin for every FINAL row of a
+	// voided invoice. Idempotent.
+	RevertInvoiceFacts(ctx context.Context, invoiceID string) error
+
+	// ReconcileBookedInvoices re-checks every invoice finalized or voided
+	// since the given time against its booked rows.
+	ReconcileBookedInvoices(ctx context.Context, since time.Time) (checked, drifted, corrected int, err error)
+
+	// GetRevenueAnalytics aggregates facts into grouped, time-bucketed rows.
+	GetRevenueAnalytics(ctx context.Context, req *dto.RevenueAnalyticsRequest) (*dto.RevenueAnalyticsResponse, error)
+}
+
+// RevenueAnalyticsService defines the interface for revenue analytics operations
+type RevenueAnalyticsService interface {
+	// GetDetailedCostAnalytics retrieves detailed cost analytics with derived metrics
+	GetDetailedCostAnalytics(ctx context.Context, req *dto.GetCostAnalyticsRequest) (*dto.GetDetailedCostAnalyticsResponse, error)
+}
+
+// DraftAndComputeOptions configures draft-and-compute workflows.
+type DraftAndComputeOptions struct {
+	// SkipIfAlreadyInvoiced skips finalized current periods.
+	SkipIfAlreadyInvoiced bool
+}
+
+type SubscriptionService interface {
+	CreateSubscription(ctx context.Context, req dto.CreateSubscriptionRequest) (*dto.SubscriptionResponse, error)
+	GetSubscription(ctx context.Context, id string) (*dto.SubscriptionResponse, error)
+	GetSubscriptionV2(ctx context.Context, id string, expand types.Expand) (*dto.SubscriptionResponseV2, error)
+	UpdateSubscription(ctx context.Context, subscriptionID string, req dto.UpdateSubscriptionRequest) (*dto.SubscriptionResponse, error)
+	CancelSubscription(ctx context.Context, subscriptionID string, req *dto.CancelSubscriptionRequest) (*dto.CancelSubscriptionResponse, error)
+	HandleSubscriptionActivatingInvoicePaid(ctx context.Context, inv *invoice.Invoice) error
+	// MarkSubscriptionIncomplete moves an active payment-gated subscription to incomplete when its renewal invoice is unpaid.
+	MarkSubscriptionIncomplete(ctx context.Context, invoiceID string) error
+	ListSubscriptions(ctx context.Context, filter *types.SubscriptionFilter) (*dto.ListSubscriptionsResponse, error)
+	GetSubscriptionsForCustomer(ctx context.Context, externalCustomerID string, expand types.Expand) (*dto.ListSubscriptionsResponse, error)
+
+	GetUsageBySubscription(ctx context.Context, req *dto.GetUsageBySubscriptionRequest) (*dto.GetUsageBySubscriptionResponse, error)
+	UpdateBillingPeriods(ctx context.Context) (*dto.SubscriptionUpdatePeriodResponse, error)
+	ProcessTrialEndDue(ctx context.Context) (*dto.SubscriptionUpdatePeriodResponse, error)
+	ProcessSingleSubscriptionTrialEnd(ctx context.Context, sub *subscription.Subscription, now time.Time) (*dto.InvoiceResponse, error)
+
+	// Pause-related methods
+	PauseSubscription(ctx context.Context, subscriptionID string, req *dto.PauseSubscriptionRequest) (*dto.PauseSubscriptionResponse, error)
+	ResumeSubscription(ctx context.Context, subscriptionID string, req *dto.ResumeSubscriptionRequest) (*dto.ResumeSubscriptionResponse, error)
+	GetPause(ctx context.Context, pauseID string) (*subscription.SubscriptionPause, error)
+	ListPauses(ctx context.Context, subscriptionID string) (*dto.ListSubscriptionPausesResponse, error)
+	CalculatePauseImpact(ctx context.Context, subscriptionID string, req *dto.PauseSubscriptionRequest) (*types.BillingImpactDetails, error)
+	CalculateResumeImpact(ctx context.Context, subscriptionID string, req *dto.ResumeSubscriptionRequest) (*types.BillingImpactDetails, error)
+
+	ValidateAndFilterPricesForSubscription(ctx context.Context, entityID string, entityType types.PriceEntityType, subscription *subscription.Subscription, workflowType *types.TemporalWorkflowType, includePriceIDs *[]string) ([]*dto.PriceResponse, error)
+
+	PreviewPlanChange(ctx context.Context, subscriptionID string, req dto.SubscriptionChangeV2Request) (*dto.SubscriptionChangeV2Response, error)
+	ExecutePlanChange(ctx context.Context, subscriptionID string, req dto.SubscriptionChangeV2Request, effectiveAt time.Time) (*dto.SubscriptionChangeV2Response, error)
+
+	ExecuteScheduledPlanChangeV2(ctx context.Context, schedule *subscription.SubscriptionSchedule, config *subscription.PlanChangeV2Configuration, sub *subscription.Subscription) error
+
+	AddAddonToSubscription(ctx context.Context, req *dto.AddAddonRequest) (*dto.AddAddonToSubscriptionResponse, error)
+	RemoveAddonFromSubscription(ctx context.Context, req *dto.RemoveAddonRequest) error
+
+	// Line item management
+	AddSubscriptionLineItem(ctx context.Context, subscriptionID string, req dto.CreateSubscriptionLineItemRequest) (*dto.SubscriptionLineItemResponse, error)
+	DeleteSubscriptionLineItem(ctx context.Context, lineItemID string, req dto.DeleteSubscriptionLineItemRequest) (*dto.SubscriptionLineItemResponse, error)
+	UpdateSubscriptionLineItem(ctx context.Context, lineItemID string, req dto.UpdateSubscriptionLineItemRequest) (*dto.SubscriptionLineItemResponse, error)
+	ListSubscriptionLineItems(ctx context.Context, filter *types.SubscriptionLineItemFilter) (*dto.ListSubscriptionLineItemsResponse, error)
+
+	// Auto-cancellation methods
+	ProcessAutoCancellationSubscriptions(ctx context.Context) error
+	// ProcessOverdueSubscriptionInvoices marks subscriptions incomplete for renewal invoices within due date + grace.
+	ProcessOverdueSubscriptionInvoices(ctx context.Context) error
+	// Renewal due alert methods
+	ProcessSubscriptionRenewalDueAlert(ctx context.Context, referenceTime time.Time) error
+
+	// ProcessAutoInvoiceThresholdBilling checks subscriptions with subscription-level auto_invoice_threshold
+	// set and runs auto invoice threshold billing (mid-period invoices when usage crosses that threshold).
+	ProcessAutoInvoiceThresholdBilling(ctx context.Context) (*dto.AutoInvoiceThresholdBillingResult, error)
+
+	// Meter usage tracking (reads from meter_usage table)
+	GetMeterUsageBySubscription(ctx context.Context, req *dto.GetUsageBySubscriptionRequest) (*dto.GetUsageBySubscriptionResponse, error)
+
+	// GetMeterUsageForSubscription is the data-fed variant of
+	// GetMeterUsageBySubscription: the caller supplies the subscription so no
+	// extra DB fetch happens for it.
+	GetMeterUsageForSubscription(ctx context.Context, sub *subscription.Subscription, req *dto.GetUsageBySubscriptionRequest) (*dto.GetUsageBySubscriptionResponse, error)
+
+	GetSubscriptionEntitlements(ctx context.Context, subscriptionID string) ([]*dto.EntitlementResponse, error)
+
+	GetSubscriptionEntitlementsForSubscription(ctx context.Context, sub *subscription.Subscription) ([]*dto.EntitlementResponse, error)
+
+	GetAggregatedSubscriptionEntitlementsForSubscription(ctx context.Context, sub *subscription.Subscription, req *dto.GetSubscriptionEntitlementsRequest) (*dto.SubscriptionEntitlementsResponse, error)
+	GetAggregatedSubscriptionEntitlements(ctx context.Context, subscriptionID string, req *dto.GetSubscriptionEntitlementsRequest) (*dto.SubscriptionEntitlementsResponse, error)
+
+	// List all tenant subscriptions
+	GetSubscriptionsForBillingPeriodUpdate(ctx context.Context, filter *types.SubscriptionFilter) (*dto.ListSubscriptionsResponse, error)
+
+	// Credit grant applications
+	GetUpcomingCreditGrantApplications(ctx context.Context, req *dto.GetUpcomingCreditGrantApplicationsRequest) (*dto.ListCreditGrantApplicationsResponse, error)
+
+	// ListByCustomerID retrieves all active subscriptions for a customer
+	ListByCustomerID(ctx context.Context, customerID string) ([]*subscription.Subscription, error)
+
+	// ActivateDraftSubscription activates a draft subscription with a new start date
+	ActivateDraftSubscription(ctx context.Context, subID string, req dto.ActivateDraftSubscriptionRequest) (*dto.SubscriptionResponse, error)
+
+	GetActiveAddonAssociations(ctx context.Context, subscriptionID string) (*dto.ListAddonAssociationsResponse, error)
+
+	// TriggerSubscriptionWorkflow triggers the subscription billing workflow
+	TriggerSubscriptionWorkflow(ctx context.Context, subscriptionID string) (*dto.TriggerSubscriptionWorkflowResponse, error)
+
+	// TriggerSubscriptionDraftAndComputeWorkflow creates an idempotent draft for the current period and runs compute via Temporal (invoice task queue).
+	TriggerSubscriptionDraftAndComputeWorkflow(ctx context.Context, subscriptionID string) (*dto.TriggerSubscriptionWorkflowResponse, error)
+
+	// TriggerSubscriptionDraftAndComputeWorkflowWithOptions starts a configurable workflow.
+	TriggerSubscriptionDraftAndComputeWorkflowWithOptions(ctx context.Context, subscriptionID string, opts DraftAndComputeOptions) (*dto.TriggerSubscriptionWorkflowResponse, error)
+
+	// Cron methods
+
+	// Calculate Billing Periods for the subscription
+	CalculateBillingPeriods(ctx context.Context, subscriptionID string) ([]dto.Period, error)
+
+	// Create Draft Invoice for the subscription
+	CreateDraftInvoiceForSubscription(ctx context.Context, subscriptionID string, period dto.Period) (*dto.InvoiceResponse, error)
+
+	// Mark cancellation schedule as executed (used by cron and Temporal workflows)
+	MarkCancellationScheduleAsExecuted(ctx context.Context, subscriptionID string) error
+
+	// CascadeCancelToInheritedSubscriptions mirrors the parent's cancellation fields onto INHERITED child subscriptions (no-op if not a parent). Used by Temporal update-billing-period cancellation and aligned with CancelSubscription / cron processing.
+	CascadeCancelToInheritedSubscriptions(ctx context.Context, parentSub *subscription.Subscription) error
+
+	// TerminateSubscriptionResources terminates line items, addon associations, and credit
+	// grants for a subscription as of req.EffectiveDate. Called eagerly by CancelSubscription for
+	// immediate cancellations, and by both processSubscriptionPeriod's period-rollover loop and
+	// the Temporal CheckCancellationActivity when a previously scheduled cancellation fires, so
+	// resources are terminated exactly once, at the point cancellation actually takes effect.
+	TerminateSubscriptionResources(ctx context.Context, req dto.TerminateSubscriptionResourcesRequest) error
+
+	// PublishCancellationEvents publishes a update and cancel webhook event for a subscription and its inherited subs.
+	// Used by Temporal activities and other callers that need to fire subscription lifecycle events.
+	PublishCancellationEvents(ctx context.Context, sub *subscription.Subscription)
+
+	// ExternalCustomerIDsForSubscription returns distinct non-empty external customer IDs
+	// for the subscription owner plus all active/trialing/draft inherited children.
+	ExternalCustomerIDsForSubscription(ctx context.Context, sub *subscription.Subscription) ([]string, error)
+}
+
+// SubscriptionModificationService handles mid-cycle subscription modifications:
+// seat/quantity changes with proration, and subscription inheritance management.
+type SubscriptionModificationService interface {
+	// Execute performs the modification and persists all changes.
+	Execute(ctx context.Context, subscriptionID string, req dto.ExecuteSubscriptionModifyRequest) (*dto.SubscriptionModifyResponse, error)
+
+	// Preview returns what would happen without committing any changes.
+	Preview(ctx context.Context, subscriptionID string, req dto.ExecuteSubscriptionModifyRequest) (*dto.SubscriptionModifyResponse, error)
+}
+
+type PriceUnitService interface {
+	CreatePriceUnit(ctx context.Context, req dto.CreatePriceUnitRequest) (*dto.CreatePriceUnitResponse, error)
+	GetPriceUnit(ctx context.Context, id string) (*dto.PriceUnitResponse, error)
+	GetPriceUnitByCode(ctx context.Context, code string) (*dto.PriceUnitResponse, error)
+	ListPriceUnits(ctx context.Context, filter *types.PriceUnitFilter) (*dto.ListPriceUnitsResponse, error)
+	UpdatePriceUnit(ctx context.Context, id string, req dto.UpdatePriceUnitRequest) (*dto.PriceUnitResponse, error)
+	DeletePriceUnit(ctx context.Context, id string) error
+}
+
+// CreditAdjustmentService defines the interface for credit adjustment operations
+type CreditAdjustmentService interface {
+	// ApplyCreditsToInvoice applies wallet credits to invoice line items
+	ApplyCreditsToInvoice(ctx context.Context, inv *invoice.Invoice) (*dto.CreditAdjustmentResult, error)
+
+	// ApplyExpiringCreditToInvoice debits credits from an expiring credit onto a draft subscription
+	// invoice and returns the amount applied; repeats, non-drafts and other currencies apply nothing.
+	ApplyExpiringCreditToInvoice(ctx context.Context, invoiceID string, w *wallet.Wallet, creditTx *wallet.Transaction, credits decimal.Decimal) (decimal.Decimal, error)
+}
+
+type CheckoutSessionService interface {
+	Create(ctx context.Context, req dto.CreateCheckoutSessionRequest) (*dto.CheckoutSessionResponse, error)
+	Get(ctx context.Context, id string) (*dto.CheckoutSessionResponse, error)
+	// GetByPaymentID returns the session owning a checkout payment, or (nil, nil) if none.
+	GetByPaymentID(ctx context.Context, paymentID string) (*dto.CheckoutSessionResponse, error)
+	// GetAndReconcile is Get plus reconciliation against the payment provider. It
+	// contacts the gateway and can complete the session, so only callers acting for
+	// the customer should use it; internal readers use Get.
+	GetAndReconcile(ctx context.Context, id string) (*dto.CheckoutSessionResponse, error)
+	List(ctx context.Context, filter *types.CheckoutSessionFilter) (*dto.ListCheckoutSessionsResponse, error)
+	Delete(ctx context.Context, id string) error
+	// Cancel terminates an in-flight session without archiving the row. Completed
+	// sessions are rejected; failed/expired sessions are returned as-is.
+	Cancel(ctx context.Context, id string) (*dto.CheckoutSessionResponse, error)
+	// CleanupCheckoutSession fetches the session by ID, archives all fulfillment entities
+	// (subscription, invoice, payment), and marks the session failed or expired.
+	// Pass reason=nil to mark as expired; pass a non-nil error to mark as failed.
+	CleanupCheckoutSession(ctx context.Context, sessionID string, reason error) error
+	// CleanupAllExpiredSessions finds all active sessions whose ExpiresAt is before
+	// effectiveDate (defaults to now) and archives them in batches of 1000.
+	// Returns total/succeeded/failed counts.
+	CleanupAllExpiredSessions(ctx context.Context, effectiveDate *time.Time) (*types.CheckoutSessionCleanupResult, error)
+	// CompleteCheckoutSession activates the subscription, finalizes the invoice, and marks
+	// the payment succeeded. Called by gateway webhook handlers after payment confirmation.
+	CompleteCheckoutSession(ctx context.Context, sessionID string, providerResult *types.CheckoutProviderResult) error
+	// StartPayFirstCheckoutSession creates a checkout session on an existing DRAFT invoice,
+	// fulfills payment + provider link, and publishes checkout.session.initiated.
+	StartPayFirstCheckoutSession(ctx context.Context, req *dto.PayFirstCheckoutRequest) (*dto.CheckoutSessionResponse, error)
+}
+
+// RefundService is the slice of the refund service a gateway webhook handler needs:
+// resolve the row the provider is talking about, then record the outcome.
+type RefundService interface {
+	GetRefundByGatewayRefundID(ctx context.Context, gateway, gatewayRefundID string) (*dto.RefundResponse, error)
+	Settle(ctx context.Context, req *dto.SettleRefundRequest) error
+	Fail(ctx context.Context, refundID, reason string) error
+}
+
+type ServiceDependencies struct {
+	CustomerService                 CustomerService
+	PaymentService                  PaymentService
+	InvoiceService                  InvoiceService
+	PlanService                     PlanService
+	SubscriptionService             SubscriptionService
+	EntityIntegrationMappingService EntityIntegrationMappingService
+	PriceUnitService                PriceUnitService
+	CreditAdjustmentService         CreditAdjustmentService
+	CheckoutSessionService          CheckoutSessionService
+	RefundService                   RefundService
+	DB                              postgres.IClient
+}

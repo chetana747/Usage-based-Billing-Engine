@@ -1,0 +1,40 @@
+package v1
+
+import (
+	"net/http"
+
+	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/gin-gonic/gin"
+)
+
+type HealthHandler struct {
+	logger *logger.Logger
+}
+
+func NewHealthHandler(
+	logger *logger.Logger,
+) *HealthHandler {
+	return &HealthHandler{
+		logger: logger,
+	}
+}
+
+// @Summary Health check
+// @ID healthCheck
+// @Description Use for liveness or readiness checks (e.g. load balancers, Kubernetes probes). Responds with 200 and status ok when the service is healthy.
+// @Tags Health
+// @Accept json
+// @Produce json
+// @Success 200 {object} map[string]string
+func (h *HealthHandler) Health(c *gin.Context) {
+	request := map[string]interface{}{}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+
+	// log the incoming request
+	h.logger.Info(c.Request.Context(), "incoming request", "method", c.Request.Method, "path", c.Request.URL.Path, "body", request)
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}

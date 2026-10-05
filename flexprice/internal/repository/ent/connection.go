@@ -1,0 +1,773 @@
+package ent
+
+import (
+	"context"
+
+	"github.com/flexprice/flexprice/ent"
+	"github.com/flexprice/flexprice/ent/connection"
+	"github.com/flexprice/flexprice/ent/predicate"
+	"github.com/flexprice/flexprice/internal/cache"
+	domainConnection "github.com/flexprice/flexprice/internal/domain/connection"
+	"github.com/flexprice/flexprice/internal/dsl"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/flexprice/flexprice/internal/postgres"
+	"github.com/flexprice/flexprice/internal/types"
+)
+
+type connectionRepository struct {
+	client     postgres.IClient
+	log        *logger.Logger
+	queryOpts  ConnectionQueryOptions
+	redisCache cache.RedisCache
+}
+
+func NewConnectionRepository(client postgres.IClient, log *logger.Logger, redisCache cache.RedisCache) domainConnection.Repository {
+	return &connectionRepository{
+		client:     client,
+		log:        log,
+		queryOpts:  ConnectionQueryOptions{},
+		redisCache: redisCache,
+	}
+}
+
+func (r *connectionRepository) Create(ctx context.Context, c *domainConnection.Connection) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "creating connection",
+		"connection_id", c.ID,
+		"tenant_id", c.TenantID,
+		"name", c.Name,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "connection", "create", map[string]interface{}{
+		"connection_id": c.ID,
+		"name":          c.Name,
+	})
+	defer FinishSpan(span)
+
+	// Set environment ID from context if not already set
+	if c.EnvironmentID == "" {
+		c.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	// Convert structured encrypted secret data to map format for database storage
+	encryptedSecretDataMap := convertConnectionMetadataToMap(c.EncryptedSecretData, c.ProviderType)
+
+	connection, err := client.Connection.Create().
+		SetID(c.ID).
+		SetTenantID(c.TenantID).
+		SetName(c.Name).
+		SetProviderType(string(c.ProviderType)).
+		SetEncryptedSecretData(encryptedSecretDataMap).
+		SetMetadata(c.Metadata).
+		SetSyncConfig(c.SyncConfig).
+		SetStatus(string(c.Status)).
+		SetCreatedAt(c.CreatedAt).
+		SetUpdatedAt(c.UpdatedAt).
+		SetCreatedBy(c.CreatedBy).
+		SetUpdatedBy(c.UpdatedBy).
+		SetEnvironmentID(c.EnvironmentID).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsConstraintError(err) {
+			return ierr.WithError(err).
+				WithHint("Failed to create connection").
+				WithReportableDetails(map[string]any{
+					"name":          c.Name,
+					"provider_type": c.ProviderType,
+				}).
+				Mark(ierr.ErrAlreadyExists)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to create connection").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	*c = *domainConnection.FromEnt(connection)
+	r.deleteAllPublishedCache(ctx)
+	return nil
+}
+
+// Get is used for providers that support multiple connections per environment.
+// this method returns the connection by the given connection ID.
+func (r *connectionRepository) Get(ctx context.Context, id string) (*domainConnection.Connection, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "connection", "get", map[string]interface{}{
+		"connection_id": id,
+	})
+	defer FinishSpan(span)
+
+	// Try to get from cache first
+	if cachedConnection := r.GetCache(ctx, id); cachedConnection != nil {
+		return cachedConnection, nil
+	}
+
+	client := r.client.Reader(ctx)
+	r.log.Debug(ctx, "getting connection", "connection_id", id)
+
+	c, err := client.Connection.Query().
+		Where(
+			connection.ID(id),
+			connection.TenantID(types.GetTenantID(ctx)),
+			connection.EnvironmentID(types.GetEnvironmentID(ctx)),
+			connection.Status(string(types.StatusPublished)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHintf("Connection with ID %s was not found", id).
+				WithReportableDetails(map[string]any{
+					"connection_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get connection").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	domainConn := domainConnection.FromEnt(c)
+
+	// Cache the result
+	r.SetCache(ctx, domainConn)
+
+	return domainConn, nil
+}
+
+// GetByProvider is used for providers that does not support multiple connections per environment.
+// this method returns the first result only and should NOT be used if the provider supports multiple connections per environment.
+func (r *connectionRepository) GetByProvider(ctx context.Context, provider types.SecretProvider) (*domainConnection.Connection, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "connection", "get_by_provider", map[string]interface{}{
+		"provider_type": provider,
+	})
+	defer FinishSpan(span)
+
+	r.log.Debug(ctx, "getting connection by provider",
+		"provider_type", provider)
+
+	connections, err := r.ListAllPublished(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, err
+	}
+
+	for _, c := range connections {
+		if c.ProviderType == provider {
+			SetSpanSuccess(span)
+			return c, nil
+		}
+	}
+
+	SetSpanError(span, ierr.ErrNotFound)
+	return nil, ierr.NewError("connection not found").
+		WithHintf("Connection with provider %s was not found in this environment", provider).
+		Mark(ierr.ErrNotFound)
+}
+
+// ListPublishedByProvider returns every published connection for a provider across all tenants and
+// environments. It intentionally skips the tenant and environment filters that List applies, so a
+// scheduled job running without a tenant context can discover the connections to process; the
+// caller sets tenant/environment context from each returned connection before using it.
+func (r *connectionRepository) ListPublishedByProvider(ctx context.Context, provider types.SecretProvider) ([]*domainConnection.Connection, error) {
+	span := StartRepositorySpan(ctx, "connection", "list_published_by_provider", map[string]interface{}{
+		"provider_type": provider,
+	})
+	defer FinishSpan(span)
+
+	connections, err := r.client.Reader(ctx).Connection.Query().
+		Where(
+			connection.ProviderType(string(provider)),
+			connection.Status(string(types.StatusPublished)),
+		).
+		All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list connections by provider").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+
+	result := make([]*domainConnection.Connection, 0, len(connections))
+	for _, c := range connections {
+		result = append(result, domainConnection.FromEnt(c))
+	}
+	return result, nil
+}
+
+// ListAllPublished returns every published connection for the tenant/environment in ctx, across
+// all providers. Read-through/write-through cached as a single list entry, since callers use this
+// to check "is provider X connected" before dispatching work rather than to read one connection.
+func (r *connectionRepository) ListAllPublished(ctx context.Context) ([]*domainConnection.Connection, error) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "connection", "list_all_published", nil)
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPublishedConnections)
+	if value, found := r.redisCache.Get(ctx, cacheKey); found {
+		if connections, ok := cache.UnmarshalCacheValue[[]*domainConnection.Connection](value); ok {
+			return *connections, nil
+		}
+	}
+
+	connections, err := r.List(ctx, types.NewNoLimitConnectionFilter())
+	if err != nil {
+		return nil, err
+	}
+
+	r.redisCache.Set(ctx, cacheKey, connections, cache.ExpiryDefaultRedis)
+	return connections, nil
+}
+
+func (r *connectionRepository) List(ctx context.Context, filter *types.ConnectionFilter) ([]*domainConnection.Connection, error) {
+	client := r.client.Reader(ctx)
+
+	query := client.Connection.Query()
+	query = r.queryOpts.ApplyTenantFilter(ctx, query)
+	query = r.queryOpts.ApplyEnvironmentFilter(ctx, query)
+	query = r.queryOpts.ApplyStatusFilter(query, string(types.StatusPublished))
+
+	query, err := r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		return nil, err
+	}
+
+	connections, err := query.All(ctx)
+	if err != nil {
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list connections").
+			Mark(ierr.ErrDatabase)
+	}
+
+	var result []*domainConnection.Connection
+	for _, c := range connections {
+		result = append(result, domainConnection.FromEnt(c))
+	}
+
+	return result, nil
+}
+
+// convertConnectionMetadataToMap converts structured encrypted secret data to map format for database storage
+func convertConnectionMetadataToMap(encryptedSecretData types.ConnectionMetadata, providerType types.SecretProvider) map[string]interface{} {
+	switch providerType {
+	case types.SecretProviderStripe:
+		if encryptedSecretData.Stripe != nil {
+			return map[string]interface{}{
+				"publishable_key": encryptedSecretData.Stripe.PublishableKey,
+				"secret_key":      encryptedSecretData.Stripe.SecretKey,
+				"webhook_secret":  encryptedSecretData.Stripe.WebhookSecret,
+				"account_id":      encryptedSecretData.Stripe.AccountID,
+			}
+		}
+	case types.SecretProviderS3:
+		if encryptedSecretData.S3 != nil {
+			result := map[string]interface{}{
+				"aws_access_key_id":     encryptedSecretData.S3.AWSAccessKeyID,
+				"aws_secret_access_key": encryptedSecretData.S3.AWSSecretAccessKey,
+			}
+			// Add session token if present (for temporary credentials)
+			if encryptedSecretData.S3.AWSSessionToken != "" {
+				result["aws_session_token"] = encryptedSecretData.S3.AWSSessionToken
+			}
+			return result
+		}
+	case types.SecretProviderHubSpot:
+		if encryptedSecretData.HubSpot != nil {
+			result := map[string]interface{}{
+				"access_token":  encryptedSecretData.HubSpot.AccessToken,
+				"client_secret": encryptedSecretData.HubSpot.ClientSecret,
+			}
+			// Add app_id if present
+			if encryptedSecretData.HubSpot.AppID != "" {
+				result["app_id"] = encryptedSecretData.HubSpot.AppID
+			}
+			return result
+		}
+	case types.SecretProviderChargebee:
+		if encryptedSecretData.Chargebee != nil {
+			result := map[string]interface{}{
+				"site":    encryptedSecretData.Chargebee.Site,
+				"api_key": encryptedSecretData.Chargebee.APIKey,
+			}
+			// Add webhook_secret if present
+			if encryptedSecretData.Chargebee.WebhookSecret != "" {
+				result["webhook_secret"] = encryptedSecretData.Chargebee.WebhookSecret
+			}
+			// Add webhook_username if present
+			if encryptedSecretData.Chargebee.WebhookUsername != "" {
+				result["webhook_username"] = encryptedSecretData.Chargebee.WebhookUsername
+			}
+			// Add webhook_password if present
+			if encryptedSecretData.Chargebee.WebhookPassword != "" {
+				result["webhook_password"] = encryptedSecretData.Chargebee.WebhookPassword
+			}
+			if encryptedSecretData.Chargebee.GatewayAccountID != "" {
+				result["gateway_account_id"] = encryptedSecretData.Chargebee.GatewayAccountID
+			}
+			return result
+		}
+	case types.SecretProviderRazorpay:
+		if encryptedSecretData.Razorpay != nil {
+			result := map[string]interface{}{
+				"key_id":     encryptedSecretData.Razorpay.KeyID,
+				"secret_key": encryptedSecretData.Razorpay.SecretKey,
+			}
+			// Add webhook_secret if present (optional)
+			if encryptedSecretData.Razorpay.WebhookSecret != "" {
+				result["webhook_secret"] = encryptedSecretData.Razorpay.WebhookSecret
+			}
+			return result
+		}
+	case types.SecretProviderQuickBooks:
+		if encryptedSecretData.QuickBooks != nil {
+			result := map[string]interface{}{
+				"client_id":     encryptedSecretData.QuickBooks.ClientID,
+				"client_secret": encryptedSecretData.QuickBooks.ClientSecret,
+				"realm_id":      encryptedSecretData.QuickBooks.RealmID,
+				"environment":   encryptedSecretData.QuickBooks.Environment,
+			}
+			if encryptedSecretData.QuickBooks.OAuthSessionData != "" {
+				result["oauth_session_data"] = encryptedSecretData.QuickBooks.OAuthSessionData
+			}
+			if encryptedSecretData.QuickBooks.AuthCode != "" {
+				result["auth_code"] = encryptedSecretData.QuickBooks.AuthCode
+			}
+			if encryptedSecretData.QuickBooks.RedirectURI != "" {
+				result["redirect_uri"] = encryptedSecretData.QuickBooks.RedirectURI
+			}
+			if encryptedSecretData.QuickBooks.AccessToken != "" {
+				result["access_token"] = encryptedSecretData.QuickBooks.AccessToken
+			}
+			if encryptedSecretData.QuickBooks.RefreshToken != "" {
+				result["refresh_token"] = encryptedSecretData.QuickBooks.RefreshToken
+			}
+			if encryptedSecretData.QuickBooks.IncomeAccountID != "" {
+				result["income_account_id"] = encryptedSecretData.QuickBooks.IncomeAccountID
+			}
+			if encryptedSecretData.QuickBooks.WebhookVerifierToken != "" {
+				result["webhook_verifier_token"] = encryptedSecretData.QuickBooks.WebhookVerifierToken
+			}
+			return result
+		}
+	case types.SecretProviderNomod:
+		if encryptedSecretData.Nomod != nil {
+			data := map[string]interface{}{
+				"api_key": encryptedSecretData.Nomod.APIKey,
+			}
+			if encryptedSecretData.Nomod.WebhookSecret != "" {
+				data["webhook_secret"] = encryptedSecretData.Nomod.WebhookSecret
+			}
+			return data
+		}
+	case types.SecretProviderMoyasar:
+		if encryptedSecretData.Moyasar != nil {
+			data := map[string]interface{}{
+				"secret_key": encryptedSecretData.Moyasar.SecretKey,
+			}
+			if encryptedSecretData.Moyasar.PublishableKey != "" {
+				data["publishable_key"] = encryptedSecretData.Moyasar.PublishableKey
+			}
+			if encryptedSecretData.Moyasar.WebhookSecret != "" {
+				data["webhook_secret"] = encryptedSecretData.Moyasar.WebhookSecret
+			}
+			return data
+		}
+	case types.SecretProviderPaddle:
+		if encryptedSecretData.Paddle != nil {
+			data := map[string]interface{}{
+				"api_key": encryptedSecretData.Paddle.APIKey,
+			}
+			if encryptedSecretData.Paddle.WebhookSecret != "" {
+				data["webhook_secret"] = encryptedSecretData.Paddle.WebhookSecret
+			}
+			if encryptedSecretData.Paddle.ClientSideToken != "" {
+				data["client_side_token"] = encryptedSecretData.Paddle.ClientSideToken
+			}
+			return data
+		}
+	case types.SecretProviderWhop:
+		if encryptedSecretData.Whop != nil {
+			data := map[string]interface{}{
+				"api_key":    encryptedSecretData.Whop.APIKey,
+				"company_id": encryptedSecretData.Whop.CompanyID,
+			}
+			if encryptedSecretData.Whop.ProductID != "" {
+				data["product_id"] = encryptedSecretData.Whop.ProductID
+			}
+			if encryptedSecretData.Whop.WebhookSecret != "" {
+				data["webhook_secret"] = encryptedSecretData.Whop.WebhookSecret
+			}
+			return data
+		}
+	case types.SecretProviderTabs:
+		if encryptedSecretData.Tabs != nil {
+			return map[string]interface{}{
+				"api_key": encryptedSecretData.Tabs.APIKey,
+			}
+		}
+	case types.SecretProviderAWSMarketplace:
+		if encryptedSecretData.AWSMarketplace != nil {
+			return map[string]interface{}{
+				"role_arn":    encryptedSecretData.AWSMarketplace.RoleArn,
+				"external_id": encryptedSecretData.AWSMarketplace.ExternalID,
+			}
+		}
+	case types.SecretProviderGCPMarketplace:
+		if encryptedSecretData.GCPMarketplace != nil {
+			return map[string]interface{}{
+				"credentials_json": encryptedSecretData.GCPMarketplace.CredentialsJSON,
+			}
+		}
+	case types.SecretProviderAzureMarketplace:
+		if encryptedSecretData.AzureMarketplace != nil {
+			return map[string]interface{}{
+				"tenant_id":     encryptedSecretData.AzureMarketplace.TenantID,
+				"client_id":     encryptedSecretData.AzureMarketplace.ClientID,
+				"client_secret": encryptedSecretData.AzureMarketplace.ClientSecret,
+			}
+		}
+	case types.SecretProviderZohoBooks:
+		if encryptedSecretData.ZohoBooks != nil {
+			result := map[string]interface{}{
+				"client_id":       encryptedSecretData.ZohoBooks.ClientID,
+				"client_secret":   encryptedSecretData.ZohoBooks.ClientSecret,
+				"organization_id": encryptedSecretData.ZohoBooks.OrganizationID,
+			}
+			if encryptedSecretData.ZohoBooks.RefreshToken != "" {
+				result["refresh_token"] = encryptedSecretData.ZohoBooks.RefreshToken
+			}
+			if encryptedSecretData.ZohoBooks.AccessToken != "" {
+				result["access_token"] = encryptedSecretData.ZohoBooks.AccessToken
+			}
+			if encryptedSecretData.ZohoBooks.AuthCode != "" {
+				result["auth_code"] = encryptedSecretData.ZohoBooks.AuthCode
+			}
+			if encryptedSecretData.ZohoBooks.RedirectURI != "" {
+				result["redirect_uri"] = encryptedSecretData.ZohoBooks.RedirectURI
+			}
+			if encryptedSecretData.ZohoBooks.APIDomain != "" {
+				result["api_domain"] = encryptedSecretData.ZohoBooks.APIDomain
+			}
+			if encryptedSecretData.ZohoBooks.AccountsURL != "" {
+				result["accounts_server"] = encryptedSecretData.ZohoBooks.AccountsURL
+			}
+			if encryptedSecretData.ZohoBooks.Location != "" {
+				result["location"] = encryptedSecretData.ZohoBooks.Location
+			}
+			if encryptedSecretData.ZohoBooks.OrganizationName != "" {
+				result["organization_name"] = encryptedSecretData.ZohoBooks.OrganizationName
+			}
+			if encryptedSecretData.ZohoBooks.Scopes != "" {
+				result["scopes"] = encryptedSecretData.ZohoBooks.Scopes
+			}
+			if encryptedSecretData.ZohoBooks.AccessTokenExpiresAt != "" {
+				result["access_token_expires_at"] = encryptedSecretData.ZohoBooks.AccessTokenExpiresAt
+			}
+			if encryptedSecretData.ZohoBooks.OAuthSessionData != "" {
+				result["oauth_session_data"] = encryptedSecretData.ZohoBooks.OAuthSessionData
+			}
+			if encryptedSecretData.ZohoBooks.WebhookSecret != "" {
+				result["webhook_secret"] = encryptedSecretData.ZohoBooks.WebhookSecret
+			}
+			return result
+		}
+	default:
+		// For other providers or unknown types, use generic format
+		if encryptedSecretData.Generic != nil {
+			return encryptedSecretData.Generic.Data
+		}
+	}
+	return make(map[string]interface{})
+}
+
+func (r *connectionRepository) Count(ctx context.Context, filter *types.ConnectionFilter) (int, error) {
+	client := r.client.Reader(ctx)
+
+	query := client.Connection.Query()
+	query = r.queryOpts.ApplyTenantFilter(ctx, query)
+	query = r.queryOpts.ApplyEnvironmentFilter(ctx, query)
+	query = r.queryOpts.ApplyStatusFilter(query, string(types.StatusPublished))
+
+	query, err := r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		return 0, err
+	}
+
+	count, err := query.Count(ctx)
+	if err != nil {
+		return 0, ierr.WithError(err).
+			WithHint("Failed to count connections").
+			Mark(ierr.ErrDatabase)
+	}
+
+	return count, nil
+}
+
+func (r *connectionRepository) Update(ctx context.Context, c *domainConnection.Connection) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "updating connection",
+		"connection_id", c.ID,
+		"tenant_id", c.TenantID,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "connection", "update", map[string]interface{}{
+		"connection_id": c.ID,
+	})
+	defer FinishSpan(span)
+
+	// Convert structured encrypted secret data to map format for database storage
+	encryptedSecretDataMap := convertConnectionMetadataToMap(c.EncryptedSecretData, c.ProviderType)
+
+	connection, err := client.Connection.UpdateOneID(c.ID).
+		Where(
+			connection.TenantID(c.TenantID),
+			connection.EnvironmentID(c.EnvironmentID),
+		).
+		SetName(c.Name).
+		SetEncryptedSecretData(encryptedSecretDataMap).
+		SetMetadata(c.Metadata).
+		SetSyncConfig(c.SyncConfig).
+		SetUpdatedAt(c.UpdatedAt).
+		SetUpdatedBy(c.UpdatedBy).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHintf("Connection with ID %s was not found", c.ID).
+				WithReportableDetails(map[string]any{
+					"connection_id": c.ID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+
+		return ierr.WithError(err).
+			WithHint("Failed to update connection").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	*c = *domainConnection.FromEnt(connection)
+
+	// Invalidate cache to ensure fresh data on next read
+	r.DeleteCache(ctx, c)
+	// Update cache with new data
+	r.SetCache(ctx, c)
+	r.deleteAllPublishedCache(ctx)
+
+	return nil
+}
+
+func (r *connectionRepository) Delete(ctx context.Context, c *domainConnection.Connection) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "deleting connection",
+		"connection_id", c.ID,
+		"tenant_id", c.TenantID,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "connection", "delete", map[string]interface{}{
+		"connection_id": c.ID,
+	})
+	defer FinishSpan(span)
+
+	_, err := client.Connection.Update().
+		Where(
+			connection.ID(c.ID),
+			connection.TenantID(c.TenantID),
+			connection.EnvironmentID(c.EnvironmentID),
+		).
+		SetStatus(string(types.StatusArchived)).
+		SetUpdatedAt(c.UpdatedAt).
+		SetUpdatedBy(c.UpdatedBy).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHintf("Connection with ID %s was not found", c.ID).
+				WithReportableDetails(map[string]any{
+					"connection_id": c.ID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to delete connection").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	r.DeleteCache(ctx, c)
+	r.deleteAllPublishedCache(ctx)
+	return nil
+}
+
+// ConnectionQuery type alias for better readability
+type ConnectionQuery = *ent.ConnectionQuery
+
+// ConnectionQueryOptions implements BaseQueryOptions for connection queries
+type ConnectionQueryOptions struct{}
+
+func (o ConnectionQueryOptions) ApplyTenantFilter(ctx context.Context, query ConnectionQuery) ConnectionQuery {
+	return query.Where(connection.TenantIDEQ(types.GetTenantID(ctx)))
+}
+
+func (o ConnectionQueryOptions) ApplyEnvironmentFilter(ctx context.Context, query ConnectionQuery) ConnectionQuery {
+	environmentID := types.GetEnvironmentID(ctx)
+	if environmentID != "" {
+		return query.Where(connection.EnvironmentIDEQ(environmentID))
+	}
+	return query
+}
+
+func (o ConnectionQueryOptions) ApplyStatusFilter(query ConnectionQuery, status string) ConnectionQuery {
+	if status == "" {
+		return query.Where(connection.StatusEQ(string(types.StatusPublished)))
+	}
+	return query.Where(connection.Status(status))
+}
+
+func (o ConnectionQueryOptions) ApplySortFilter(query ConnectionQuery, field string, order string) ConnectionQuery {
+	if field != "" {
+		if order == types.OrderDesc {
+			query = query.Order(ent.Desc(o.GetFieldName(field)))
+		} else {
+			query = query.Order(ent.Asc(o.GetFieldName(field)))
+		}
+	}
+	return query
+}
+
+func (o ConnectionQueryOptions) ApplyPaginationFilter(query ConnectionQuery, limit int, offset int) ConnectionQuery {
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	return query
+}
+
+// GetFieldName returns the ent field name for connection; delegates to ent's ValidColumn so new schema fields are supported automatically.
+func (o ConnectionQueryOptions) GetFieldName(field string) string {
+	if connection.ValidColumn(field) {
+		return field
+	}
+	return ""
+}
+
+func (o ConnectionQueryOptions) GetFieldResolver(field string) (string, error) {
+	fieldName := o.GetFieldName(field)
+	if fieldName == "" {
+		return "", ierr.NewErrorf("unknown field name '%s' in connection query", field).
+			Mark(ierr.ErrValidation)
+	}
+	return fieldName, nil
+}
+
+func (o ConnectionQueryOptions) applyEntityQueryOptions(_ context.Context, f *types.ConnectionFilter, query ConnectionQuery) (ConnectionQuery, error) {
+	var err error
+	if f == nil {
+		return query, nil
+	}
+
+	if f.ProviderType != "" {
+		query = query.Where(connection.ProviderTypeEQ(string(f.ProviderType)))
+	}
+
+	if len(f.ConnectionIDs) > 0 {
+		query = query.Where(connection.IDIn(f.ConnectionIDs...))
+	}
+
+	if f.Filters != nil {
+		query, err = dsl.ApplyFilters[ConnectionQuery, predicate.Connection](
+			query,
+			f.Filters,
+			o.GetFieldResolver,
+			func(p dsl.Predicate) predicate.Connection { return predicate.Connection(p) },
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Apply sorts using the generic function
+	if f.Sort != nil {
+		query, err = dsl.ApplySorts[ConnectionQuery, connection.OrderOption](
+			query,
+			f.Sort,
+			o.GetFieldResolver,
+			func(o dsl.OrderFunc) connection.OrderOption { return connection.OrderOption(o) },
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return query, nil
+}
+
+func (r *connectionRepository) SetCache(ctx context.Context, connection *domainConnection.Connection) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "connection", "set", map[string]interface{}{
+		"connection_id": connection.ID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixConnection, connection.ID)
+	r.redisCache.Set(ctx, cacheKey, connection, cache.ExpiryDefaultRedis)
+}
+
+func (r *connectionRepository) GetCache(ctx context.Context, id string) *domainConnection.Connection {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "connection", "get", map[string]interface{}{
+		"connection_id": id,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixConnection, id)
+	value, found := r.redisCache.Get(ctx, cacheKey)
+	if !found {
+		return nil
+	}
+	c, ok := cache.UnmarshalCacheValue[domainConnection.Connection](value)
+	if !ok {
+		return nil
+	}
+	return c
+}
+
+func (r *connectionRepository) DeleteCache(ctx context.Context, connection *domainConnection.Connection) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "connection", "delete", map[string]interface{}{
+		"connection_id": connection.ID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixConnection, connection.ID)
+	r.redisCache.Delete(ctx, cacheKey)
+}
+
+// deleteAllPublishedCache invalidates the cached ListAllPublished result for the tenant/environment
+// in ctx. Called on any create/update/delete so a newly connected, updated, or disconnected
+// integration is reflected immediately instead of waiting out the cache TTL.
+func (r *connectionRepository) deleteAllPublishedCache(ctx context.Context) {
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPublishedConnections)
+	r.redisCache.Delete(ctx, cacheKey)
+}

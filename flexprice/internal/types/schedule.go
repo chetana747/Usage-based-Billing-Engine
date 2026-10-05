@@ -1,0 +1,89 @@
+package types
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/samber/lo"
+)
+
+// ScheduleID is the Temporal server schedule ID for a recurring workflow.
+type ScheduleID string
+
+const (
+	ScheduleIDCreditGrantProcessing                   ScheduleID = "credit-grants-processing"
+	ScheduleIDSubscriptionAutoCancellation            ScheduleID = "subscription-auto-cancellation"
+	ScheduleIDSubscriptionOverdueInvoices             ScheduleID = "subscription-overdue-invoices"
+	ScheduleIDWalletCreditExpiry                      ScheduleID = "wallet-credit-expiry"
+	ScheduleIDSubscriptionBilling                     ScheduleID = "subscription-billing"
+	ScheduleIDSubscriptionRenewalAlerts               ScheduleID = "subscription-renewal-due-alerts"
+	ScheduleIDSubscriptionTrialEndDue                 ScheduleID = "subscription-trial-end-due"
+	ScheduleIDSubscriptionAutoInvoiceThresholdBilling ScheduleID = "subscription-auto-invoice-threshold-billing"
+	ScheduleIDOutboundWebhookStaleRetry               ScheduleID = "webhook-stale-retry"
+	ScheduleIDPaddleInvoicePullSync                   ScheduleID = "paddle-invoice-pull-sync"
+	ScheduleIDMoyasarAuthPaymentSettlement            ScheduleID = "moyasar-auth-payment-settlement"
+	ScheduleIDCheckoutSessionExpiry                   ScheduleID = "checkout-session-expiry"
+	ScheduleIDMarketplaceUsageSnapshot                ScheduleID = "marketplace-usage-snapshot"
+	ScheduleIDMarketplaceUsageReport                  ScheduleID = "marketplace-usage-report"
+	ScheduleIDDailyDraftAndCompute                    ScheduleID = "daily-draft-and-compute"
+	ScheduleIDDraftInvoiceFinalization                ScheduleID = "draft-invoice-finalization"
+	// ScheduleIDRevenueRollup drives RevenueRollupWorkflow; gated off by default
+	// via analytics.revenue_rollup.enabled (see EnsureSchedules).
+	ScheduleIDRevenueRollup ScheduleID = "revenue-rollup"
+)
+
+// String returns the raw schedule id.
+func (id ScheduleID) String() string { return string(id) }
+
+// AllTemporalServerScheduleIDs returns every active managed Temporal server schedule id
+// (keep aligned with AllTemporalScheduleConfigs in internal/temporal/service/schedules.go).
+func AllTemporalServerScheduleIDs() []ScheduleID {
+	return []ScheduleID{
+		ScheduleIDCreditGrantProcessing,
+		ScheduleIDSubscriptionAutoCancellation,
+		ScheduleIDSubscriptionOverdueInvoices,
+		ScheduleIDWalletCreditExpiry,
+		ScheduleIDSubscriptionBilling,
+		ScheduleIDSubscriptionRenewalAlerts,
+		ScheduleIDSubscriptionTrialEndDue,
+		ScheduleIDSubscriptionAutoInvoiceThresholdBilling,
+		ScheduleIDOutboundWebhookStaleRetry,
+		ScheduleIDPaddleInvoicePullSync,
+		ScheduleIDMoyasarAuthPaymentSettlement,
+		ScheduleIDCheckoutSessionExpiry,
+		ScheduleIDMarketplaceUsageSnapshot,
+		ScheduleIDMarketplaceUsageReport,
+		ScheduleIDDailyDraftAndCompute,
+		ScheduleIDDraftInvoiceFinalization,
+		ScheduleIDRevenueRollup,
+	}
+}
+
+// Validate returns nil if this id is a known managed Temporal server schedule.
+func (id ScheduleID) Validate() error {
+	if id == "" {
+		return ierr.NewError("schedule_id is required").
+			WithHint("Must be a known server schedule id").
+			Mark(ierr.ErrValidation)
+	}
+	allowed := AllTemporalServerScheduleIDs()
+	if lo.Contains(allowed, id) {
+		return nil
+	}
+	return ierr.NewError("invalid schedule_id").
+		WithHint(fmt.Sprintf("Must be one of: %s", strings.Join(lo.Map(allowed, func(s ScheduleID, _ int) string { return string(s) }), ", "))).
+		Mark(ierr.ErrValidation)
+}
+
+// ScheduleConfig is everything needed to create or update one Temporal server schedule.
+type ScheduleConfig struct {
+	ID       ScheduleID
+	Interval time.Duration
+	// Offset is applied within each interval.
+	Offset    time.Duration
+	Workflow  interface{}
+	Input     interface{}
+	TaskQueue TemporalTaskQueue
+}

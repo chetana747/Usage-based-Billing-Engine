@@ -1,0 +1,271 @@
+package schema
+
+import (
+	"time"
+
+	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema/edge"
+	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
+	baseMixin "github.com/flexprice/flexprice/ent/schema/mixin"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/shopspring/decimal"
+)
+
+// Subscription holds the schema definition for the Subscription entity.
+type Subscription struct {
+	ent.Schema
+}
+
+// Mixin of the Subscription.
+func (Subscription) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		baseMixin.BaseMixin{},
+		baseMixin.EnvironmentMixin{},
+	}
+}
+
+// Fields of the Subscription.
+func (Subscription) Fields() []ent.Field {
+	return []ent.Field{
+		field.String("id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Unique().
+			Immutable(),
+		field.String("lookup_key").
+			Optional(),
+		field.String("customer_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			NotEmpty().
+			Immutable(),
+		field.String("plan_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			NotEmpty(),
+		field.String("subscription_status").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Default(string(types.SubscriptionStatusActive)).
+			GoType(types.SubscriptionStatus("")),
+		field.String("currency").
+			SchemaType(map[string]string{
+				"postgres": "varchar(10)",
+			}).
+			NotEmpty().
+			Immutable(),
+		field.Time("billing_anchor").
+			Default(time.Now),
+		field.Time("start_date").
+			Default(time.Now),
+		field.Time("end_date").
+			Optional().
+			Nillable(),
+		field.Time("current_period_start").
+			Default(time.Now),
+		field.Time("current_period_end").
+			Default(time.Now),
+		field.Time("cancelled_at").
+			Optional().
+			Nillable(),
+		field.Time("cancel_at").
+			Optional().
+			Nillable(),
+		field.Bool("cancel_at_period_end").
+			Default(false),
+		field.Time("trial_start").
+			Optional().
+			Nillable(),
+		field.Time("trial_end").
+			Optional().
+			Nillable(),
+		field.String("billing_cadence").
+			NotEmpty().
+			Immutable().
+			GoType(types.BillingCadence("")),
+		field.String("billing_period").
+			NotEmpty().
+			Immutable().
+			GoType(types.BillingPeriod("")),
+		field.Int("billing_period_count").
+			Default(1).
+			Immutable(),
+		field.Int("version").
+			Default(1),
+		field.JSON("metadata", map[string]string{}).
+			Optional().
+			SchemaType(map[string]string{
+				"postgres": "jsonb",
+			}),
+		field.String("pause_status").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Default(string(types.PauseStatusNone)).
+			GoType(types.PauseStatus("")),
+		field.String("active_pause_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Optional().
+			Nillable(),
+		field.String("billing_cycle").
+			NotEmpty().
+			Immutable().
+			Default(string(types.BillingCycleAnniversary)).
+			GoType(types.BillingCycle("")),
+		field.Other("commitment_amount", decimal.Decimal{}).
+			Optional().
+			Nillable().
+			SchemaType(map[string]string{
+				"postgres": "decimal(20,6)",
+			}),
+		field.String("commitment_duration").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Optional().
+			Nillable().
+			GoType(types.BillingPeriod("")),
+		field.Other("overage_factor", decimal.Decimal{}).
+			Optional().
+			Nillable().
+			Default(decimal.NewFromInt(1)).
+			SchemaType(map[string]string{
+				"postgres": "decimal(10,6)",
+			}),
+		// Payment behavior and collection method fields
+		field.String("payment_behavior").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Default(string(types.PaymentBehaviorDefaultActive)).
+			GoType(types.PaymentBehavior("")).
+			Comment("Determines how subscription payments are handled"),
+		field.String("collection_method").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Default(string(types.CollectionMethodChargeAutomatically)).
+			GoType(types.CollectionMethod("")).
+			Comment("Determines how invoices are collected"),
+		field.String("gateway_payment_method_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(255)",
+			}).
+			Optional().
+			Comment("Gateway payment method ID for this subscription"),
+		field.String("timezone").
+			Default("UTC"),
+		field.String("proration_behavior").
+			NotEmpty().
+			Immutable().
+			Default(string(types.ProrationBehaviorNone)).
+			GoType(types.ProrationBehavior("")),
+		field.String("line_item_grouping").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Default(string(types.LineItemGroupingPerChargePeriod)).
+			GoType(types.LineItemGrouping("")).
+			Comment("Whether a charge shorter than the billing period bills as one line item per charge period or one per billing period"),
+		field.Bool("enable_true_up").
+			Default(false).
+			Comment("Enable Commitment True Up Fee"),
+		field.String("invoicing_customer_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Optional().
+			Nillable().
+			Comment("Customer ID to use for invoicing (can differ from the subscription customer)"),
+		field.String("parent_subscription_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Optional().
+			Nillable().
+			Comment("Parent subscription ID for hierarchy (e.g. child subscription under a parent)"),
+		// Payment terms (e.g. 15 NET, 30 NET) used to compute invoice due date from period end
+		field.String("payment_terms").
+			SchemaType(map[string]string{
+				"postgres": "varchar(20)",
+			}).
+			Optional().
+			Nillable().
+			GoType(types.PaymentTerms("")).
+			Comment("Payment terms for invoice due date (e.g. 15 NET, 30 NET, 45 NET, 60 NET, 75 NET, 90 NET)"),
+		field.String("subscription_type").
+			SchemaType(map[string]string{
+				"postgres": "varchar(20)",
+			}).
+			Default(string(types.SubscriptionTypeStandalone)).
+			GoType(types.SubscriptionType("")).
+			Comment("Subscription type within a customer hierarchy (standalone, parent, inherited)"),
+		field.Other("auto_invoice_threshold", decimal.Decimal{}).
+			Optional().
+			Nillable().
+			SchemaType(map[string]string{
+				"postgres": "decimal(20,6)",
+			}).
+			Comment("Threshold usage amount (in subscription currency) that triggers an intermediate invoice. Overrides plan-level threshold when set."),
+
+		// Plan-price sequence up to which this subscription's line items
+		// have been reconciled with its plan's prices. Bumped by the
+		// plan-price sync after a successful reconciliation pass.
+		field.Int64("synced_price_sequence").
+			Default(0).
+			Annotations(entsql.Default("0")),
+	}
+}
+
+// Edges of the Subscription.
+func (Subscription) Edges() []ent.Edge {
+	return []ent.Edge{
+		edge.To("line_items", SubscriptionLineItem.Type),
+		edge.To("pauses", SubscriptionPause.Type),
+		edge.To("phases", SubscriptionPhase.Type),
+		edge.To("schedules", SubscriptionSchedule.Type).
+			Comment("Subscription can have multiple schedules for plan changes, addons, etc."),
+		edge.To("credit_grants", CreditGrant.Type),
+		edge.To("coupon_associations", CouponAssociation.Type).
+			Comment("Subscription can have multiple coupon associations"),
+		edge.To("coupon_applications", CouponApplication.Type).
+			Comment("Subscription can have multiple coupon applications"),
+		edge.To("invoicing_customer", Customer.Type).
+			Unique().
+			Field("invoicing_customer_id").
+			Comment("Customer to use for invoicing (can differ from the subscription customer)"),
+	}
+}
+
+// Indexes of the Subscription.
+func (Subscription) Indexes() []ent.Index {
+	return []ent.Index{
+		// Common query patterns from repository layer
+		index.Fields("tenant_id", "environment_id", "customer_id", "status").
+			Annotations(entsql.IndexWhere("((status)::text = 'published'::text)")),
+		index.Fields("tenant_id", "environment_id", "plan_id", "status"),
+		index.Fields("tenant_id", "environment_id", "subscription_status", "status"),
+		// For billing period updates
+		index.Fields("tenant_id", "environment_id", "current_period_end", "subscription_status", "status"),
+		// Drives the plan-price sync's "which subs are behind?" lookup.
+		// `id` is included so the discovery CTE's `ORDER BY synced_price_sequence, id LIMIT N`
+		// can be served as an index range scan that stops after N rows, instead of
+		// a Top-N sort over the full stale-sub set (see plan_price_sync_v2.go).
+		index.Fields("tenant_id", "environment_id", "plan_id", "synced_price_sequence", "id").
+			Annotations(entsql.IndexWhere(
+				"(((status)::text = 'published'::text) AND ((subscription_type)::text = ANY (ARRAY[('standalone'::character varying)::text, ('delegated_invoicing'::character varying)::text, ('parent'::character varying)::text, ('grouped_invoicing'::character varying)::text])))")),
+		// Holds only active payment-gated subscriptions, so the overdue sweep skips everything else.
+		index.Fields("tenant_id", "environment_id").
+			StorageKey("idx_subscriptions_gated_active").
+			Annotations(entsql.IndexWhere(
+				"(((status)::text = 'published'::text) AND ((subscription_status)::text = 'active'::text) AND ((payment_behavior)::text = ANY (ARRAY[('allow_incomplete'::character varying)::text, ('default_incomplete'::character varying)::text, ('error_if_incomplete'::character varying)::text])))")),
+	}
+}

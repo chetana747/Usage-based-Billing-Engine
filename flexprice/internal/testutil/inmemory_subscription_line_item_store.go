@@ -1,0 +1,405 @@
+package testutil
+
+import (
+	"context"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/domain/subscription"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
+)
+
+// InMemorySubscriptionLineItemStore implements subscription.LineItemRepository
+type InMemorySubscriptionLineItemStore struct {
+	*InMemoryStore[*subscription.SubscriptionLineItem]
+}
+
+// NewInMemorySubscriptionLineItemStore creates a new in-memory subscription line item store
+func NewInMemorySubscriptionLineItemStore() *InMemorySubscriptionLineItemStore {
+	return &InMemorySubscriptionLineItemStore{
+		InMemoryStore: NewInMemoryStore[*subscription.SubscriptionLineItem](),
+	}
+}
+
+// lineItemFilterFn implements filtering logic for subscription line items
+func lineItemFilterFn(ctx context.Context, item *subscription.SubscriptionLineItem, filter interface{}) bool {
+	if item == nil {
+		return false
+	}
+
+	f, ok := filter.(*types.SubscriptionLineItemFilter)
+	if !ok {
+		return true // No filter applied
+	}
+
+	// Check tenant ID
+	if tenantID, ok := ctx.Value(types.CtxTenantID).(string); ok {
+		if item.TenantID != tenantID {
+			return false
+		}
+	}
+
+	// Apply environment filter
+	if !CheckEnvironmentFilter(ctx, item.EnvironmentID) {
+		return false
+	}
+
+	// Filter by subscription IDs
+	if len(f.SubscriptionIDs) > 0 && !lo.Contains(f.SubscriptionIDs, item.SubscriptionID) {
+		return false
+	}
+
+	// Filter by subscription line item IDs
+	if len(f.SubscriptionLineItemIDs) > 0 && !lo.Contains(f.SubscriptionLineItemIDs, item.ID) {
+		return false
+	}
+
+	// Without this the store returns every line on the subscription when a caller
+	// asks for one attachment's lines, so plan lines get swept into addon work.
+	if len(f.AddonAssociationIDs) > 0 &&
+		(item.AddonAssociationID == nil || !lo.Contains(f.AddonAssociationIDs, *item.AddonAssociationID)) {
+		return false
+	}
+
+	// Filter by entity type (when set)
+	if f.EntityType != nil && item.EntityType != *f.EntityType {
+		return false
+	}
+
+	// Filter by entity IDs (when set)
+	if len(f.EntityIDs) > 0 {
+		if !lo.Contains(f.EntityIDs, item.EntityID) {
+			return false
+		}
+		// When EntityType is not set, legacy behavior: only match plan line items
+		if f.EntityType == nil && item.EntityType != types.SubscriptionLineItemEntityTypePlan {
+			return false
+		}
+	}
+
+	// Filter by price IDs
+	if len(f.PriceIDs) > 0 && !lo.Contains(f.PriceIDs, item.PriceID) {
+		return false
+	}
+
+	// Filter by meter IDs
+	if len(f.MeterIDs) > 0 && !lo.Contains(f.MeterIDs, item.MeterID) {
+		return false
+	}
+
+	// Filter by currencies
+	if len(f.Currencies) > 0 && !lo.Contains(f.Currencies, item.Currency) {
+		return false
+	}
+
+	// Filter by billing periods
+	if len(f.BillingPeriods) > 0 && !lo.Contains(f.BillingPeriods, string(item.BillingPeriod)) {
+		return false
+	}
+
+	if st := f.GetStatus(); st != "" && string(item.Status) != st {
+		return false
+	}
+
+	// Match ent applyActiveLineItemFilter: published, EndDate nil or EndDate >= reference
+	if f.ActiveFilter && f.CurrentPeriodStart != nil {
+		if item.Status != types.StatusPublished {
+			return false
+		}
+		if !item.EndDate.IsZero() && item.EndDate.Before(*f.CurrentPeriodStart) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// lineItemSortFn implements sorting logic for subscription line items (oldest first, consistent with CreateWithLineItems order).
+func lineItemSortFn(i, j *subscription.SubscriptionLineItem) bool {
+	if i == nil || j == nil {
+		return false
+	}
+	if i.CreatedAt.Equal(j.CreatedAt) {
+		return i.ID < j.ID
+	}
+	return i.CreatedAt.Before(j.CreatedAt)
+}
+
+// Create creates a new subscription line item
+func (s *InMemorySubscriptionLineItemStore) Create(ctx context.Context, item *subscription.SubscriptionLineItem) error {
+	if item == nil {
+		return ierr.NewError("subscription line item cannot be nil").
+			WithHint("Subscription line item data is required").
+			Mark(ierr.ErrValidation)
+	}
+
+	// Set environment ID from context if not already set
+	if item.EnvironmentID == "" {
+		item.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	err := s.InMemoryStore.Create(ctx, item.ID, item)
+	if err != nil {
+		if ierr.IsAlreadyExists(err) {
+			return ierr.WithError(err).
+				WithHint("A subscription line item with this ID already exists").
+				WithReportableDetails(map[string]interface{}{
+					"line_item_id": item.ID,
+				}).
+				Mark(ierr.ErrAlreadyExists)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to create subscription line item").
+			WithReportableDetails(map[string]interface{}{
+				"line_item_id": item.ID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return nil
+}
+
+// Get retrieves a subscription line item by ID
+func (s *InMemorySubscriptionLineItemStore) Get(ctx context.Context, id string) (*subscription.SubscriptionLineItem, error) {
+	item, err := s.InMemoryStore.Get(ctx, id)
+	if err != nil {
+		if ierr.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHint("Subscription line item not found").
+				WithReportableDetails(map[string]interface{}{
+					"line_item_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to retrieve subscription line item").
+			WithReportableDetails(map[string]interface{}{
+				"line_item_id": id,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return item, nil
+}
+
+// GetForUpdate has no lock to take: the in-memory store already serializes access.
+func (s *InMemorySubscriptionLineItemStore) GetForUpdate(ctx context.Context, id string) (*subscription.SubscriptionLineItem, error) {
+	return s.Get(ctx, id)
+}
+
+// Update updates a subscription line item
+func (s *InMemorySubscriptionLineItemStore) Update(ctx context.Context, item *subscription.SubscriptionLineItem) error {
+	if item == nil {
+		return ierr.NewError("subscription line item cannot be nil").
+			WithHint("Subscription line item data is required").
+			Mark(ierr.ErrValidation)
+	}
+	err := s.InMemoryStore.Update(ctx, item.ID, item)
+	if err != nil {
+		if ierr.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHint("Subscription line item not found").
+				WithReportableDetails(map[string]interface{}{
+					"line_item_id": item.ID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to update subscription line item").
+			WithReportableDetails(map[string]interface{}{
+				"line_item_id": item.ID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return nil
+}
+
+// BulkTerminate terminates all subscription line items for a subscription up to a given date
+func (s *InMemorySubscriptionLineItemStore) BulkTerminate(ctx context.Context, subscriptionID string, effectiveDate time.Time) (int, error) {
+	items, err := s.ListBySubscription(ctx, &subscription.Subscription{ID: subscriptionID})
+	if err != nil {
+		return 0, ierr.WithError(err).
+			WithHint("Failed to list subscription line items").
+			Mark(ierr.ErrDatabase)
+	}
+
+	affected := 0
+	for _, item := range items {
+		if !item.StartDate.IsZero() && item.StartDate.After(effectiveDate) {
+			continue
+		}
+		if !item.EndDate.IsZero() && item.EndDate.Before(effectiveDate) {
+			continue
+		}
+
+		affected++
+		item.EndDate = effectiveDate
+		if err := s.Update(ctx, item); err != nil {
+			return 0, ierr.WithError(err).
+				WithHint("Failed to update subscription line item").
+				WithReportableDetails(map[string]interface{}{
+					"line_item_id": item.ID,
+				}).
+				Mark(ierr.ErrDatabase)
+		}
+	}
+	return affected, nil
+}
+
+// Delete deletes a subscription line item
+func (s *InMemorySubscriptionLineItemStore) Delete(ctx context.Context, id string) error {
+	err := s.InMemoryStore.Delete(ctx, id)
+	if err != nil {
+		if ierr.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHint("Subscription line item not found").
+				WithReportableDetails(map[string]interface{}{
+					"line_item_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to delete subscription line item").
+			WithReportableDetails(map[string]interface{}{
+				"line_item_id": id,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return nil
+}
+
+// CreateBulk creates multiple subscription line items in bulk
+func (s *InMemorySubscriptionLineItemStore) CreateBulk(ctx context.Context, items []*subscription.SubscriptionLineItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	for _, item := range items {
+		if err := s.Create(ctx, item); err != nil {
+			return ierr.WithError(err).
+				WithHint("Failed to create subscription line items in bulk").
+				WithReportableDetails(map[string]interface{}{
+					"count": len(items),
+				}).
+				Mark(ierr.ErrDatabase)
+		}
+	}
+	return nil
+}
+
+// ListBySubscription retrieves all line items for a subscription
+func (s *InMemorySubscriptionLineItemStore) ListBySubscription(ctx context.Context, sub *subscription.Subscription) ([]*subscription.SubscriptionLineItem, error) {
+	filter := &types.SubscriptionLineItemFilter{
+		SubscriptionIDs: []string{sub.ID},
+	}
+	return s.List(ctx, filter)
+}
+
+// List retrieves subscription line items based on filter
+func (s *InMemorySubscriptionLineItemStore) List(ctx context.Context, filter *types.SubscriptionLineItemFilter) ([]*subscription.SubscriptionLineItem, error) {
+	items, err := s.InMemoryStore.List(ctx, filter, lineItemFilterFn, lineItemSortFn)
+	if err != nil {
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list subscription line items").
+			Mark(ierr.ErrDatabase)
+	}
+	return items, nil
+}
+
+// SubscriptionIDsWithWindowedCommitment mirrors the ent repository: published
+// line items carrying a windowed commitment, by subscription.
+func (s *InMemorySubscriptionLineItemStore) SubscriptionIDsWithWindowedCommitment(ctx context.Context) ([]string, error) {
+	filter := types.NewNoLimitSubscriptionLineItemFilter()
+	filter.ActiveFilter = false
+	if filter.QueryFilter != nil {
+		filter.QueryFilter.Status = lo.ToPtr(types.StatusPublished)
+	}
+
+	items, err := s.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, li := range items {
+		if !li.CommitmentWindowed {
+			continue
+		}
+		if _, ok := seen[li.SubscriptionID]; ok {
+			continue
+		}
+		seen[li.SubscriptionID] = struct{}{}
+		ids = append(ids, li.SubscriptionID)
+	}
+	return ids, nil
+}
+
+// GetDistinctCustomerIDsWithCommitmentTrueUp returns distinct customer IDs from published
+// line items where commitment_true_up_enabled is true.
+func (s *InMemorySubscriptionLineItemStore) GetDistinctCustomerIDsWithCommitmentTrueUp(ctx context.Context) ([]string, error) {
+	filter := types.NewNoLimitSubscriptionLineItemFilter()
+	filter.ActiveFilter = false
+	if filter.QueryFilter != nil {
+		filter.QueryFilter.Status = lo.ToPtr(types.StatusPublished)
+	}
+
+	items, err := s.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{})
+	var customerIDs []string
+	for _, item := range items {
+		// HasTrueUpEnabled() covers bucket-level true-up too (mirrors the ent SQL).
+		if !item.HasTrueUpEnabled() {
+			continue
+		}
+		if _, ok := seen[item.CustomerID]; ok {
+			continue
+		}
+		seen[item.CustomerID] = struct{}{}
+		customerIDs = append(customerIDs, item.CustomerID)
+	}
+	return customerIDs, nil
+}
+
+// Count counts subscription line items based on filter
+func (s *InMemorySubscriptionLineItemStore) Count(ctx context.Context, filter *types.SubscriptionLineItemFilter) (int, error) {
+	count, err := s.InMemoryStore.Count(ctx, filter, lineItemFilterFn)
+	if err != nil {
+		return 0, ierr.WithError(err).
+			WithHint("Failed to count subscription line items").
+			Mark(ierr.ErrDatabase)
+	}
+	return count, nil
+}
+
+// Clear clears all subscription line items from the store
+func (s *InMemorySubscriptionLineItemStore) Clear() {
+	s.InMemoryStore.Clear()
+}
+
+// ListByCustomer retrieves all line items for a customer
+func (s *InMemorySubscriptionLineItemStore) ListByCustomer(ctx context.Context, customerID string) ([]*subscription.SubscriptionLineItem, error) {
+	filter := &types.SubscriptionLineItemFilter{
+		EntityIDs: []string{customerID},
+	}
+	return s.List(ctx, filter)
+}
+
+// GetByPriceID retrieves all line items for a price
+func (s *InMemorySubscriptionLineItemStore) GetByPriceID(ctx context.Context, priceID string) ([]*subscription.SubscriptionLineItem, error) {
+	filter := &types.SubscriptionLineItemFilter{
+		PriceIDs: []string{priceID},
+	}
+	return s.List(ctx, filter)
+}
+
+// GetByPlanID retrieves all line items for a plan
+func (s *InMemorySubscriptionLineItemStore) GetByPlanID(ctx context.Context, planID string) ([]*subscription.SubscriptionLineItem, error) {
+	filter := &types.SubscriptionLineItemFilter{
+		EntityIDs: []string{planID},
+	}
+	return s.List(ctx, filter)
+}

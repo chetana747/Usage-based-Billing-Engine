@@ -1,0 +1,642 @@
+package subscription
+
+import (
+	"context"
+	"fmt"
+	"math/rand" // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used -- jitter, not security-sensitive
+	"time"
+
+	"github.com/flexprice/flexprice/internal/api/dto"
+	"github.com/flexprice/flexprice/internal/domain/subscription"
+	"github.com/flexprice/flexprice/internal/ee/service"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/logger"
+	invoiceModels "github.com/flexprice/flexprice/internal/temporal/models/invoice"
+	subscriptionModels "github.com/flexprice/flexprice/internal/temporal/models/subscription"
+	temporalService "github.com/flexprice/flexprice/internal/temporal/service"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
+	"go.temporal.io/sdk/temporal"
+)
+
+type BillingActivities struct {
+	subscriptionService service.SubscriptionService
+	serviceParams       service.ServiceParams
+	logger              *logger.Logger
+}
+
+func NewBillingActivities(
+	subscriptionService service.SubscriptionService,
+	serviceParams service.ServiceParams,
+	logger *logger.Logger,
+) *BillingActivities {
+	return &BillingActivities{
+		subscriptionService: subscriptionService,
+		serviceParams:       serviceParams,
+		logger:              logger,
+	}
+}
+
+// CheckDraftSubscriptionActivity checks if the subscription is draft
+func (s *BillingActivities) CheckDraftSubscriptionActivity(
+	ctx context.Context,
+	input subscriptionModels.CheckDraftSubscriptionActivityInput,
+) (*subscriptionModels.CheckDraftSubscriptionActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	sub, err := s.serviceParams.SubRepo.Get(ctx, input.SubscriptionID)
+	if err != nil {
+		s.logger.Error(ctx, "CheckDraftSubscriptionActivity failed",
+			"error", err,
+			"subscription_id", input.SubscriptionID,
+			"tenant_id", input.TenantID,
+			"environment_id", input.EnvironmentID,
+		)
+		return nil, err
+	}
+
+	if sub.SubscriptionStatus == types.SubscriptionStatusDraft {
+		return &subscriptionModels.CheckDraftSubscriptionActivityOutput{
+			IsDraft: true,
+		}, nil
+	}
+
+	if sub.SubscriptionType == types.SubscriptionTypeInherited {
+		return &subscriptionModels.CheckDraftSubscriptionActivityOutput{
+			IsInherited: true,
+		}, nil
+	}
+
+	return &subscriptionModels.CheckDraftSubscriptionActivityOutput{
+		IsDraft: false,
+	}, nil
+}
+
+// CalculatePeriodsActivity calculates billing periods from the current period up to the specified time
+func (s *BillingActivities) CalculatePeriodsActivity(
+	ctx context.Context,
+	input subscriptionModels.CalculatePeriodsActivityInput,
+) (*subscriptionModels.CalculatePeriodsActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	subscriptionService := service.NewSubscriptionService(s.serviceParams)
+
+	periods, err := subscriptionService.CalculateBillingPeriods(ctx, input.SubscriptionID)
+	if err != nil {
+		s.logger.Error(ctx, "CalculatePeriodsActivity failed",
+			"error", err,
+			"subscription_id", input.SubscriptionID,
+			"tenant_id", input.TenantID,
+			"environment_id", input.EnvironmentID,
+		)
+		return nil, err
+	}
+
+	output := &subscriptionModels.CalculatePeriodsActivityOutput{
+		Periods:       periods,
+		ShouldProcess: len(periods) > 1,
+	}
+
+	return output, nil
+}
+
+// CreateDraftInvoicesActivity creates draft invoices for specific billing periods
+// This activity does NOT finalize, sync, or attempt payment - those are handled by ProcessInvoiceWorkflow
+func (s *BillingActivities) CreateDraftInvoicesActivity(
+	ctx context.Context,
+	input subscriptionModels.CreateInvoicesActivityInput,
+) (*subscriptionModels.CreateInvoicesActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	subscriptionService := service.NewSubscriptionService(s.serviceParams)
+
+	invoices := make([]string, 0)
+	for _, period := range input.Periods {
+		draft, err := subscriptionService.CreateDraftInvoiceForSubscription(ctx, input.SubscriptionID, period)
+		if err != nil {
+			// Idempotent no-op: a finalized/paid invoice already exists for this period.
+			// The workflow's intent — "make sure invoices exist for these periods" — is
+			// satisfied. Skip and continue; if we propagated this Temporal would retry
+			// the activity forever since the state can never revert.
+			if ierr.IsAlreadyExists(err) {
+				s.logger.Info(ctx, "invoice already exists for period, skipping",
+					"subscription_id", input.SubscriptionID,
+					"period_start", period.Start,
+					"period_end", period.End)
+				continue
+			}
+			return nil, err
+		}
+		if draft == nil {
+			return nil, fmt.Errorf("CreateDraftInvoiceForSubscription returned nil for subscription %s period %s-%s",
+				input.SubscriptionID, period.Start, period.End)
+		}
+		invoices = append(invoices, draft.ID)
+	}
+
+	return &subscriptionModels.CreateInvoicesActivityOutput{
+		InvoiceIDs: invoices,
+	}, nil
+}
+
+// UpdateCurrentPeriodActivity updates the subscription to the new current period
+func (s *BillingActivities) UpdateCurrentPeriodActivity(
+	ctx context.Context,
+	input subscriptionModels.UpdateSubscriptionPeriodActivityInput,
+) (*subscriptionModels.UpdateSubscriptionPeriodActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	// Get the subscription
+	sub, err := s.serviceParams.SubRepo.Get(ctx, input.SubscriptionID)
+	if err != nil {
+		s.logger.Error(ctx, "UpdateCurrentPeriodActivity failed",
+			"error", err,
+			"subscription_id", input.SubscriptionID,
+			"tenant_id", input.TenantID,
+			"environment_id", input.EnvironmentID,
+		)
+		return nil, err
+	}
+
+	// Update to the new current period
+	sub.CurrentPeriodStart = input.PeriodStart
+	sub.CurrentPeriodEnd = input.PeriodEnd
+
+	// Update the subscription
+	if err := s.serviceParams.SubRepo.Update(ctx, sub); err != nil {
+		s.logger.Error(ctx, "failed to update subscription period",
+			"subscription_id", sub.ID,
+			"new_period_start", input.PeriodStart,
+			"new_period_end", input.PeriodEnd,
+			"error", err)
+		return nil, err
+	}
+
+	s.logger.Info(ctx, "updated subscription period",
+		"subscription_id", sub.ID,
+		"new_period_start", input.PeriodStart,
+		"new_period_end", input.PeriodEnd)
+
+	if err := s.advanceGroupedInvoicingChildrenPeriod(ctx, sub, input.PeriodStart, input.PeriodEnd); err != nil {
+		return nil, err
+	}
+
+	return &subscriptionModels.UpdateSubscriptionPeriodActivityOutput{
+		Success: true,
+	}, nil
+}
+
+func (s *BillingActivities) advanceGroupedInvoicingChildrenPeriod(
+	ctx context.Context,
+	parent *subscription.Subscription,
+	periodStart time.Time,
+	periodEnd time.Time,
+) error {
+	if parent.SubscriptionType != types.SubscriptionTypeParent {
+		return nil
+	}
+
+	filter := types.NewNoLimitSubscriptionFilter()
+	filter.QueryFilter.Status = lo.ToPtr(types.StatusPublished)
+	filter.ParentSubscriptionIDs = []string{parent.ID}
+	filter.SubscriptionTypes = []types.SubscriptionType{types.SubscriptionTypeGroupedInvoicing}
+	filter.SubscriptionStatus = []types.SubscriptionStatus{
+		types.SubscriptionStatusActive,
+		types.SubscriptionStatusTrialing,
+	}
+
+	children, err := s.serviceParams.SubRepo.List(ctx, filter)
+	if err != nil {
+		s.logger.Error(ctx, "failed to list grouped_invoicing children for period cascade",
+			"error", err,
+			"parent_subscription_id", parent.ID)
+		return err
+	}
+
+	for _, child := range children {
+		child.CurrentPeriodStart = periodStart
+		child.CurrentPeriodEnd = periodEnd
+		if err := s.serviceParams.SubRepo.Update(ctx, child); err != nil {
+			s.logger.Error(ctx, "failed to update grouped_invoicing child period",
+				"error", err,
+				"child_subscription_id", child.ID,
+				"parent_subscription_id", parent.ID)
+			return err
+		}
+	}
+
+	return nil
+}
+
+const (
+	processInvoiceStartDelay = 1 * time.Hour
+	processInvoiceJitterSpan = 4 * time.Hour
+)
+
+// processInvoiceDelaySeconds is the StartDelay for ProcessInvoiceWorkflow:
+// a 1h wait plus a uniform jitter in [0, 4h), so the workflow starts in [1h, 5h).
+func processInvoiceDelaySeconds() int {
+	jitter := time.Duration(rand.Int63n(int64(processInvoiceJitterSpan))) // #nosec G404 -- jitter, not security-sensitive
+	return int((processInvoiceStartDelay + jitter) / time.Second)
+}
+
+// TriggerInvoiceWorkflowActivity triggers invoice workflows for each invoice (fire-and-forget)
+// If triggering fails for any invoice, it logs the error and continues with the rest
+func (s *BillingActivities) TriggerInvoiceWorkflowActivity(
+	ctx context.Context,
+	input invoiceModels.TriggerInvoiceWorkflowActivityInput,
+) (*invoiceModels.TriggerInvoiceWorkflowActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	temporalSvc := temporalService.GetGlobalTemporalService()
+
+	output := &invoiceModels.TriggerInvoiceWorkflowActivityOutput{
+		TriggeredCount: 0,
+		FailedCount:    0,
+		FailedInvoices: make([]string, 0),
+	}
+
+	for _, invoiceID := range input.InvoiceIDs {
+		_, err := temporalSvc.ExecuteWorkflowWithDelay(
+			ctx,
+			types.TemporalProcessInvoiceWorkflow,
+			invoiceModels.ProcessInvoiceWorkflowInput{
+				InvoiceID:     invoiceID,
+				TenantID:      input.TenantID,
+				EnvironmentID: input.EnvironmentID,
+				UserID:        input.UserID,
+			},
+			processInvoiceDelaySeconds(),
+		)
+		if err != nil {
+			s.logger.Error(ctx, "failed to trigger invoice workflow",
+				"invoice_id", invoiceID,
+				"error", err)
+			output.FailedCount++
+			output.FailedInvoices = append(output.FailedInvoices, invoiceID)
+			// Continue with other invoices - don't fail the entire activity
+			continue
+		}
+
+		s.logger.Info(ctx, "triggered invoice workflow",
+			"invoice_id", invoiceID)
+		output.TriggeredCount++
+	}
+
+	return output, nil
+}
+
+// CheckCancellationActivity checks if a subscription should be cancelled and performs the cancellation
+func (s *BillingActivities) CheckCancellationActivity(
+	ctx context.Context,
+	input subscriptionModels.CheckSubscriptionCancellationActivityInput,
+) (*subscriptionModels.CheckSubscriptionCancellationActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	sub, err := s.serviceParams.SubRepo.Get(ctx, input.SubscriptionID)
+	if err != nil {
+		s.logger.Error(ctx, "CheckCancellationActivity failed",
+			"error", err,
+			"subscription_id", input.SubscriptionID,
+			"tenant_id", input.TenantID,
+			"environment_id", input.EnvironmentID,
+		)
+		return nil, err
+	}
+
+	shouldCancel := false
+	var cancelledAt *time.Time
+
+	// Check for cancellation at period end
+	if sub.CancelAtPeriodEnd && sub.CancelAt != nil && !sub.CancelAt.After(input.Period.End) {
+		shouldCancel = true
+		cancelledAt = sub.CancelAt
+		s.logger.Info(ctx, "subscription should be cancelled at period end",
+			"subscription_id", sub.ID,
+			"period_end", input.Period.End,
+			"cancel_at", *sub.CancelAt)
+	}
+
+	// Check if period end matches the subscription end date
+	if sub.EndDate != nil && input.Period.End.Equal(*sub.EndDate) {
+		shouldCancel = true
+		cancelledAt = sub.EndDate
+		s.logger.Info(ctx, "subscription reached end date",
+			"subscription_id", sub.ID,
+			"period_end", input.Period.End,
+			"end_date", *sub.EndDate)
+	}
+
+	// Perform cancellation if required
+	if shouldCancel {
+		sub.SubscriptionStatus = types.SubscriptionStatusCancelled
+		sub.CancelledAt = cancelledAt
+		subscriptionService := service.NewSubscriptionService(s.serviceParams)
+
+		err := s.serviceParams.DB.WithTx(ctx, func(ctx context.Context) error {
+			// Update subscription
+			if err := s.serviceParams.SubRepo.Update(ctx, sub); err != nil {
+				return err
+			}
+
+			// Terminate line items, addon associations, and credit grants now that the
+			// previously scheduled cancellation has actually fired. Gated on
+			// CancelAtPeriodEnd+CancelAt (set only by CancelSubscription's end_of_period/
+			// scheduled_date path), matching processSubscriptionPeriod's equivalent hook in
+			// internal/ee/service/subscription.go — never fires for a bare EndDate set through
+			// some other path that never had termination deferred in the first place.
+			if sub.CancelAtPeriodEnd && sub.CancelAt != nil {
+				if err := subscriptionService.TerminateSubscriptionResources(ctx, dto.TerminateSubscriptionResourcesRequest{
+					SubscriptionID:     sub.ID,
+					EffectiveDate:      *sub.CancelAt,
+					CancellationReason: sub.Metadata["cancellation_reason"],
+				}); err != nil {
+					return err
+				}
+			}
+
+			// Update the cancellation schedule status to executed
+			if err := subscriptionService.MarkCancellationScheduleAsExecuted(ctx, sub.ID); err != nil {
+				s.logger.Error(ctx, "failed to mark cancellation schedule as executed",
+					"subscription_id", sub.ID,
+					"error", err)
+				// Don't fail the transaction, just log the error
+			}
+
+			// Match CancelSubscription / cron processSubscriptionPeriod: cancel inherited child subs with the parent
+			if err := subscriptionService.CascadeCancelToInheritedSubscriptions(ctx, sub); err != nil {
+				return err
+			}
+
+			return nil
+		})
+		if err != nil {
+			s.logger.Error(ctx, "failed to cancel subscription",
+				"subscription_id", sub.ID,
+				"error", err)
+			return nil, err
+		}
+
+		subscriptionService.PublishCancellationEvents(ctx, sub)
+
+		s.logger.Info(ctx, "subscription cancelled successfully",
+			"subscription_id", sub.ID,
+			"cancelled_at", *cancelledAt)
+	}
+
+	return &subscriptionModels.CheckSubscriptionCancellationActivityOutput{
+		IsCancelled: shouldCancel,
+		Success:     true,
+	}, nil
+}
+
+// ProcessPendingPlanChangesActivity processes any pending plan change schedules for a subscription
+func (s *BillingActivities) ProcessPendingPlanChangesActivity(
+	ctx context.Context,
+	input subscriptionModels.ProcessPendingPlanChangesActivityInput,
+) (*subscriptionModels.ProcessPendingPlanChangesActivityOutput, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Set context values
+	ctx = types.SetTenantID(ctx, input.TenantID)
+	ctx = types.SetEnvironmentID(ctx, input.EnvironmentID)
+	ctx = types.SetUserID(ctx, input.UserID)
+
+	// Get the subscription
+	sub, err := s.serviceParams.SubRepo.Get(ctx, input.SubscriptionID)
+	if err != nil {
+		s.logger.Error(ctx, "failed to get subscription",
+			"subscription_id", input.SubscriptionID,
+			"error", err)
+		return nil, err
+	}
+
+	// Only process if subscription is active
+	if sub.SubscriptionStatus != types.SubscriptionStatusActive {
+		s.logger.Info(ctx, "subscription not active, skipping plan change processing",
+			"subscription_id", sub.ID,
+			"status", sub.SubscriptionStatus)
+		return &subscriptionModels.ProcessPendingPlanChangesActivityOutput{
+			Success:    true,
+			WasChanged: false,
+		}, nil
+	}
+
+	// Check if there's a pending plan change schedule
+	schedule, err := s.serviceParams.SubScheduleRepo.GetPendingBySubscriptionAndType(
+		ctx,
+		sub.ID,
+		types.SubscriptionScheduleChangeTypePlanChange,
+	)
+	if err != nil {
+		s.logger.Error(ctx, "failed to check for pending plan change",
+			"subscription_id", sub.ID,
+			"error", err)
+		return nil, err
+	}
+
+	// No pending schedule, nothing to do
+	if schedule == nil {
+		s.logger.Debug(ctx, "no pending plan change found",
+			"subscription_id", sub.ID)
+		return &subscriptionModels.ProcessPendingPlanChangesActivityOutput{
+			Success:    true,
+			WasChanged: false,
+		}, nil
+	}
+
+	// Guard: Check if schedule is due (scheduled_at <= now)
+	if schedule.ScheduledAt.After(time.Now()) {
+		s.logger.Info(ctx, "schedule not yet due, skipping execution",
+			"schedule_id", schedule.ID,
+			"subscription_id", sub.ID,
+			"scheduled_at", schedule.ScheduledAt,
+			"current_time", time.Now())
+		return &subscriptionModels.ProcessPendingPlanChangesActivityOutput{
+			Success:    true,
+			WasChanged: false,
+		}, nil
+	}
+
+	s.logger.Info(ctx, "found pending plan change schedule, executing",
+		"schedule_id", schedule.ID,
+		"subscription_id", sub.ID,
+		"scheduled_at", schedule.ScheduledAt)
+
+	// Execute the plan change using the subscription service
+	subscriptionService := service.NewSubscriptionService(s.serviceParams)
+	changeService := service.NewSubscriptionChangeService(s.serviceParams)
+
+	// Execute the scheduled plan change
+	err = s.executeScheduledPlanChange(ctx, schedule, changeService, subscriptionService, sub)
+	if err != nil {
+		s.logger.Error(ctx, "failed to execute scheduled plan change",
+			"schedule_id", schedule.ID,
+			"subscription_id", sub.ID,
+			"error", err)
+		return nil, err
+	}
+
+	s.logger.Info(ctx, "successfully executed plan change at period end",
+		"schedule_id", schedule.ID,
+		"subscription_id", sub.ID)
+
+	return &subscriptionModels.ProcessPendingPlanChangesActivityOutput{
+		Success:    true,
+		WasChanged: true,
+	}, nil
+}
+
+// executeScheduledPlanChange executes a scheduled plan change
+func (s *BillingActivities) executeScheduledPlanChange(
+	ctx context.Context,
+	schedule *subscription.SubscriptionSchedule,
+	changeService service.SubscriptionChangeService,
+	subscriptionService service.SubscriptionService,
+	sub *subscription.Subscription,
+) error {
+	v2Config, err := schedule.GetPlanChangeV2Config()
+	if err != nil {
+		return fmt.Errorf("failed to parse plan change configuration: %w", err)
+	}
+	if v2Config.IsV2() {
+		err := subscriptionService.ExecuteScheduledPlanChangeV2(ctx, schedule, v2Config, sub)
+		if err != nil && service.IsTerminalPlanChangeError(err) {
+			return temporal.NewNonRetryableApplicationError(
+				"scheduled plan change cannot succeed", "TerminalPlanChangeFailure", err)
+		}
+		return err
+	}
+
+	// Get the plan change configuration
+	config, err := schedule.GetPlanChangeConfig()
+	if err != nil {
+		return fmt.Errorf("failed to parse plan change configuration: %w", err)
+	}
+
+	// Build change request from configuration
+	changeRequest := dto.SubscriptionChangeRequest{
+		TargetPlanID:       config.TargetPlanID,
+		ProrationBehavior:  config.ProrationBehavior,
+		BillingCadence:     config.BillingCadence,
+		BillingPeriod:      config.BillingPeriod,
+		BillingPeriodCount: config.BillingPeriodCount,
+		BillingCycle:       config.BillingCycle,
+		Metadata:           config.ChangeMetadata,
+	}
+
+	// Execute the change
+	response, err := changeService.ExecuteSubscriptionChangeInternal(ctx, schedule.SubscriptionID, changeRequest)
+	if err != nil {
+		// Mark schedule as failed
+		schedule.Status = types.ScheduleStatusFailed
+		schedule.ExecutedAt = lo.ToPtr(time.Now().UTC())
+		schedule.ErrorMessage = lo.ToPtr(err.Error())
+		if updateErr := s.serviceParams.SubScheduleRepo.Update(ctx, schedule); updateErr != nil {
+			s.logger.Error(ctx, "failed to update schedule status to failed",
+				"error", err,
+				"schedule_id", schedule.ID,
+				"subscription_id", schedule.SubscriptionID,
+				"original_error", err,
+				"update_error", updateErr)
+		}
+		return err
+	}
+
+	// Validate response is not nil and has required fields
+	if response == nil {
+		err := fmt.Errorf("subscription change returned nil response")
+		schedule.Status = types.ScheduleStatusFailed
+		schedule.ExecutedAt = lo.ToPtr(time.Now().UTC())
+		schedule.ErrorMessage = lo.ToPtr(err.Error())
+		if updateErr := s.serviceParams.SubScheduleRepo.Update(ctx, schedule); updateErr != nil {
+			s.logger.Error(ctx, "failed to update schedule status to failed",
+				"error", err,
+				"schedule_id", schedule.ID,
+				"subscription_id", schedule.SubscriptionID,
+				"update_error", updateErr)
+		}
+		return err
+	}
+
+	if response.OldSubscription.ID == "" || response.NewSubscription.ID == "" {
+		err := fmt.Errorf("subscription change response missing required subscription IDs")
+		schedule.Status = types.ScheduleStatusFailed
+		schedule.ExecutedAt = lo.ToPtr(time.Now().UTC())
+		schedule.ErrorMessage = lo.ToPtr(err.Error())
+		if updateErr := s.serviceParams.SubScheduleRepo.Update(ctx, schedule); updateErr != nil {
+			s.logger.Error(ctx, "failed to update schedule status to failed",
+				"error", err,
+				"schedule_id", schedule.ID,
+				"subscription_id", schedule.SubscriptionID,
+				"update_error", updateErr)
+		}
+		return err
+	}
+
+	// Mark schedule as completed
+	schedule.Status = types.ScheduleStatusExecuted
+	schedule.ExecutedAt = lo.ToPtr(time.Now().UTC())
+
+	// Set execution result
+	result := &subscription.PlanChangeResult{
+		OldSubscriptionID: response.OldSubscription.ID,
+		NewSubscriptionID: response.NewSubscription.ID,
+		ChangeType:        string(response.ChangeType),
+		EffectiveDate:     response.EffectiveDate,
+	}
+	if err := schedule.SetPlanChangeResult(result); err != nil {
+		s.logger.Error(ctx, "failed to set plan change result", "error", err)
+	}
+
+	if err := s.serviceParams.SubScheduleRepo.Update(ctx, schedule); err != nil {
+		s.logger.Error(ctx, "failed to update schedule status", "error", err)
+		return err
+	}
+
+	return nil
+}

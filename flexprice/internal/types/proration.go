@@ -1,0 +1,166 @@
+package types
+
+import (
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/samber/lo"
+)
+
+// ProrationAction defines the type of change triggering proration.
+type ProrationAction string
+
+const (
+	ProrationActionUpgrade        ProrationAction = "upgrade"
+	ProrationActionDowngrade      ProrationAction = "downgrade"
+	ProrationActionQuantityChange ProrationAction = "quantity_change"
+	ProrationActionCancellation   ProrationAction = "cancellation"
+	ProrationActionAddItem        ProrationAction = "add_item"
+	ProrationActionRemoveItem     ProrationAction = "remove_item"
+	ProrationActionPriceChange    ProrationAction = "price_change"
+)
+
+// ProrationStrategy defines how the proration coefficient is calculated.
+type ProrationStrategy string
+
+const (
+	StrategyDayBased    ProrationStrategy = "day_based"    // Default
+	StrategySecondBased ProrationStrategy = "second_based" // Future enhancement
+)
+
+// ProrationBehavior defines how proration is applied (e.g., create invoice items).
+type ProrationBehavior string
+
+const (
+	ProrationBehaviorCreateProrations ProrationBehavior = "create_prorations" // Default: Create credits/charges on invoice
+	ProrationBehaviorNone             ProrationBehavior = "none"              // Calculate but don't apply (e.g., for previews)
+)
+
+// BillingMode represents when a subscription is billed.
+type BillingMode string
+
+const (
+	BillingModeInAdvance BillingMode = "in_advance"
+	BillingModeInArrears BillingMode = "in_arrears"
+)
+
+// TerminationReason represents why a subscription is being terminated.
+type TerminationReason string
+
+const (
+	TerminationReasonUpgrade      TerminationReason = "upgrade"
+	TerminationReasonDowngrade    TerminationReason = "downgrade"
+	TerminationReasonCancellation TerminationReason = "cancellation"
+	TerminationReasonExpiration   TerminationReason = "expiration"
+)
+
+// CancellationType determines when a cancellation takes effect.
+type CancellationType string
+
+const (
+	CancellationTypeImmediate     CancellationType = "immediate"
+	CancellationTypeEndOfPeriod   CancellationType = "end_of_period"
+	CancellationTypeScheduledDate CancellationType = "scheduled_date"
+)
+
+var CancellationTypeValues = []CancellationType{
+	CancellationTypeImmediate,
+	CancellationTypeEndOfPeriod,
+	CancellationTypeScheduledDate,
+}
+
+func (c CancellationType) Validate() error {
+	if !lo.Contains(CancellationTypeValues, c) {
+		return ierr.NewError("invalid cancellation type").
+			WithHint("Cancellation type must be immediate, end_of_period, or scheduled_date").
+			WithReportableDetails(map[string]any{
+				"allowed_values": CancellationTypeValues,
+				"provided_value": c,
+			}).
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}
+
+func (c CancellationType) String() string {
+	return string(c)
+}
+
+// CancelImmediatelyInvoicePolicy controls whether to generate a final invoice on immediate subscription cancellation.
+type CancelImmediatelyInvoicePolicy string
+
+const (
+	CancelImmediatelyInvoicePolicyGenerateInvoice CancelImmediatelyInvoicePolicy = "generate_invoice"
+	CancelImmediatelyInvoicePolicySkip            CancelImmediatelyInvoicePolicy = "skip"
+)
+
+func (p CancelImmediatelyInvoicePolicy) Validate() error {
+
+	allowedValues := []CancelImmediatelyInvoicePolicy{
+		CancelImmediatelyInvoicePolicyGenerateInvoice,
+		CancelImmediatelyInvoicePolicySkip,
+	}
+
+	if !lo.Contains(allowedValues, p) {
+		return ierr.NewError("invalid cancel immediately invoice policy").
+			WithHint("Cancel immediately invoice policy must be generate_invoice or skip").
+			WithReportableDetails(map[string]any{
+				"allowed_values": allowedValues,
+				"provided_value": p,
+			}).
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}
+
+func (p CancelImmediatelyInvoicePolicy) String() string {
+	return string(p)
+}
+
+// BillingCycleAnchor defines how billing cycle is handled during subscription changes
+type BillingCycleAnchor string
+
+const (
+	BillingCycleAnchorUnchanged BillingCycleAnchor = "unchanged" // Keep current billing anchor
+	BillingCycleAnchorReset     BillingCycleAnchor = "reset"     // Reset to current date
+	BillingCycleAnchorImmediate BillingCycleAnchor = "immediate" // Bill immediately
+)
+
+var BillingCycleAnchorValues = []BillingCycleAnchor{
+	BillingCycleAnchorUnchanged,
+	BillingCycleAnchorReset,
+	BillingCycleAnchorImmediate,
+}
+
+func (b BillingCycleAnchor) Validate() error {
+	if !lo.Contains(BillingCycleAnchorValues, b) {
+		return ierr.NewError("invalid billing cycle anchor").
+			WithHint("Billing cycle anchor must be unchanged, reset, or immediate").
+			WithReportableDetails(map[string]any{
+				"allowed_values": BillingCycleAnchorValues,
+				"provided_value": b,
+			}).
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}
+
+func (b BillingCycleAnchor) String() string {
+	return string(b)
+}
+
+var ProrationBehaviorValues = []ProrationBehavior{
+	ProrationBehaviorCreateProrations,
+	ProrationBehaviorNone,
+}
+
+func (p ProrationBehavior) Validate() error {
+	if !lo.Contains(ProrationBehaviorValues, p) {
+		return ierr.NewError("invalid proration behavior").
+			WithHint("Proration behavior must be create_prorations or none").
+			WithReportableDetails(map[string]any{
+				"allowed_values": ProrationBehaviorValues,
+				"provided_value": p,
+			}).
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}

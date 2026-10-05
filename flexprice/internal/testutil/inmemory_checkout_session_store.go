@@ -1,0 +1,324 @@
+package testutil
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	domainCheckout "github.com/flexprice/flexprice/internal/domain/checkout"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/types"
+)
+
+// InMemoryCheckoutSessionStore implements domainCheckout.Repository for tests.
+type InMemoryCheckoutSessionStore struct {
+	*InMemoryStore[*domainCheckout.CheckoutSession]
+
+	// claimMu makes MarkCompleted / MarkTerminal atomic. The real repository claims a
+	// session with a conditional UPDATE, so a double that read, checked and wrote without
+	// a lock would let two callers both win the claim — the opposite of what it stands in for.
+	claimMu sync.Mutex
+}
+
+func NewInMemoryCheckoutSessionStore() *InMemoryCheckoutSessionStore {
+	return &InMemoryCheckoutSessionStore{
+		InMemoryStore: NewInMemoryStore[*domainCheckout.CheckoutSession](),
+	}
+}
+
+func (s *InMemoryCheckoutSessionStore) Create(ctx context.Context, session *domainCheckout.CheckoutSession) error {
+	if session.IdempotencyKey != nil {
+		items, _ := s.InMemoryStore.List(ctx, nil, nil, nil)
+		for _, existing := range items {
+			if existing.IdempotencyKey != nil &&
+				*existing.IdempotencyKey == *session.IdempotencyKey &&
+				(existing.CheckoutStatus == types.CheckoutStatusInitiated ||
+					existing.CheckoutStatus == types.CheckoutStatusPending) {
+				return ierr.NewError("active checkout session with this idempotency key already exists").
+					Mark(ierr.ErrAlreadyExists)
+			}
+		}
+	}
+	return s.InMemoryStore.Create(ctx, session.ID, session)
+}
+
+func (s *InMemoryCheckoutSessionStore) Get(ctx context.Context, id string) (*domainCheckout.CheckoutSession, error) {
+	stored, err := s.InMemoryStore.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	// Hand back a copy. The real repository returns a fresh row per read, and callers
+	// mutate what they read; sharing the stored record races every concurrent reader.
+	//
+	// The struct copy is not enough on its own — the JSONB fields are pointers, so two
+	// readers would still share whatever they point at.
+	session := *stored
+	if stored.ProviderResult != nil {
+		pr := *stored.ProviderResult
+		session.ProviderResult = &pr
+	}
+	if stored.Result != nil {
+		r := *stored.Result
+		session.Result = &r
+	}
+	if stored.PaymentProviderConfig != nil {
+		c := *stored.PaymentProviderConfig
+		session.PaymentProviderConfig = &c
+	}
+	if stored.Metadata != nil {
+		m := make(map[string]string, len(stored.Metadata))
+		for k, v := range stored.Metadata {
+			m[k] = v
+		}
+		session.Metadata = m
+	}
+	return &session, nil
+}
+
+func (s *InMemoryCheckoutSessionStore) GetByCheckoutInvoiceID(ctx context.Context, invoiceID string) (*domainCheckout.CheckoutSession, error) {
+	sessions, err := s.List(ctx, &types.CheckoutSessionFilter{
+		QueryFilter:        types.NewNoLimitQueryFilter(),
+		CheckoutInvoiceIDs: []string{invoiceID},
+		CheckoutStatuses:   types.ActiveCheckoutStatuses(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	return sessions[0], nil
+}
+
+func (s *InMemoryCheckoutSessionStore) GetSessionByPaymentID(ctx context.Context, paymentID string) (*domainCheckout.CheckoutSession, error) {
+	sessions, err := s.List(ctx, &types.CheckoutSessionFilter{
+		QueryFilter:        types.NewNoLimitQueryFilter(),
+		CheckoutPaymentIDs: []string{paymentID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	return sessions[0], nil
+}
+
+func (s *InMemoryCheckoutSessionStore) Update(ctx context.Context, session *domainCheckout.CheckoutSession) error {
+	return s.InMemoryStore.Update(ctx, session.ID, session)
+}
+
+func checkoutSessionFilterFn(ctx context.Context, session *domainCheckout.CheckoutSession, f interface{}) bool {
+	if session == nil {
+		return false
+	}
+	if f == nil {
+		return true
+	}
+	filter, ok := f.(*types.CheckoutSessionFilter)
+	if !ok {
+		return true
+	}
+	if len(filter.CustomerIDs) > 0 {
+		found := false
+		for _, id := range filter.CustomerIDs {
+			if session.CustomerID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if len(filter.CheckoutStatuses) > 0 {
+		found := false
+		for _, st := range filter.CheckoutStatuses {
+			if session.CheckoutStatus == st {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if len(filter.CheckoutInvoiceIDs) > 0 {
+		if session.CheckoutInvoiceID == nil {
+			return false
+		}
+		found := false
+		for _, id := range filter.CheckoutInvoiceIDs {
+			if *session.CheckoutInvoiceID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if len(filter.CheckoutPaymentIDs) > 0 {
+		if session.CheckoutPaymentID == nil {
+			return false
+		}
+		found := false
+		for _, id := range filter.CheckoutPaymentIDs {
+			if *session.CheckoutPaymentID == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if len(filter.Actions) > 0 {
+		found := false
+		for _, a := range filter.Actions {
+			if session.Action == a {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if cfg := filter.Configuration; cfg != nil && !cfg.IsEmpty() {
+		sessionCfg := session.Configuration.ToCheckoutConfiguration()
+		if cfg.WalletID != "" {
+			if sessionCfg.WalletTopupParams == nil || sessionCfg.WalletTopupParams.WalletID != cfg.WalletID {
+				return false
+			}
+		}
+		if cfg.SubscriptionID != "" {
+			matchesModify := sessionCfg.ModifySubscriptionParams != nil &&
+				sessionCfg.ModifySubscriptionParams.SubscriptionID == cfg.SubscriptionID
+			matchesAddAddon := sessionCfg.AddAddonParams != nil &&
+				sessionCfg.AddAddonParams.SubscriptionID == cfg.SubscriptionID
+			if !matchesModify && !matchesAddAddon {
+				return false
+			}
+		}
+	}
+	// Mirror Ent ApplyStatusFilter: empty status defaults to published.
+	status := filter.GetStatus()
+	if status == "" {
+		status = string(types.StatusPublished)
+	}
+	if session.Status != types.Status(status) {
+		return false
+	}
+	return true
+}
+
+func checkoutSessionSortFn(i, j *domainCheckout.CheckoutSession) bool {
+	if i == nil || j == nil {
+		return false
+	}
+	return i.CreatedAt.After(j.CreatedAt)
+}
+
+func (s *InMemoryCheckoutSessionStore) List(ctx context.Context, filter *types.CheckoutSessionFilter) ([]*domainCheckout.CheckoutSession, error) {
+	return s.InMemoryStore.List(ctx, filter, checkoutSessionFilterFn, checkoutSessionSortFn)
+}
+
+func (s *InMemoryCheckoutSessionStore) Count(ctx context.Context, filter *types.CheckoutSessionFilter) (int, error) {
+	return s.InMemoryStore.Count(ctx, filter, checkoutSessionFilterFn)
+}
+
+func (s *InMemoryCheckoutSessionStore) Delete(ctx context.Context, id string) error {
+	session, err := s.InMemoryStore.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	session.Status = types.StatusArchived
+	return s.InMemoryStore.Update(ctx, id, session)
+}
+
+func (s *InMemoryCheckoutSessionStore) MarkCompleted(ctx context.Context, sessionID string, completedAt time.Time, providerResult *types.CheckoutProviderResult) (bool, error) {
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+
+	session, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	// Only claim if the session is still in a non-terminal state.
+	if session.CheckoutStatus != types.CheckoutStatusPending && session.CheckoutStatus != types.CheckoutStatusInitiated {
+		return false, nil
+	}
+	session.CheckoutStatus = types.CheckoutStatusCompleted
+	session.CompletedAt = &completedAt
+	if providerResult != nil {
+		session.ProviderResult = (*domainCheckout.JSONBCheckoutProviderResult)(providerResult)
+	}
+	if err := s.InMemoryStore.Update(ctx, sessionID, session); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *InMemoryCheckoutSessionStore) MarkTerminal(ctx context.Context, sessionID string, status types.CheckoutStatus, failureReason *string) (bool, error) {
+	if status != types.CheckoutStatusExpired && status != types.CheckoutStatusFailed {
+		return false, ierr.NewError("invalid terminal checkout status").
+			WithHint("MarkTerminal accepts expired or failed").
+			Mark(ierr.ErrValidation)
+	}
+
+	s.claimMu.Lock()
+	defer s.claimMu.Unlock()
+
+	session, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	if session.CheckoutStatus != types.CheckoutStatusPending && session.CheckoutStatus != types.CheckoutStatusInitiated {
+		return false, nil
+	}
+	session.CheckoutStatus = status
+	session.FailureReason = failureReason
+	if err := s.InMemoryStore.Update(ctx, sessionID, session); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *InMemoryCheckoutSessionStore) ListExpiredCheckoutSessions(ctx context.Context, effectiveDate time.Time, limit, offset int) ([]*domainCheckout.CheckoutSession, error) {
+	items, err := s.InMemoryStore.List(ctx, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var expired []*domainCheckout.CheckoutSession
+	for _, item := range items {
+		if (item.CheckoutStatus == types.CheckoutStatusInitiated || item.CheckoutStatus == types.CheckoutStatusPending) &&
+			!item.ExpiresAt.IsZero() && item.ExpiresAt.Before(effectiveDate) {
+			expired = append(expired, item)
+		}
+	}
+	if offset >= len(expired) {
+		return nil, nil
+	}
+	expired = expired[offset:]
+	if limit > 0 && len(expired) > limit {
+		expired = expired[:limit]
+	}
+	return expired, nil
+}
+
+func (s *InMemoryCheckoutSessionStore) GetByIdempotencyKey(ctx context.Context, key string) (*domainCheckout.CheckoutSession, error) {
+	items, err := s.InMemoryStore.List(ctx, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.IdempotencyKey != nil && *item.IdempotencyKey == key &&
+			(item.CheckoutStatus == types.CheckoutStatusInitiated ||
+				item.CheckoutStatus == types.CheckoutStatusPending) {
+			return item, nil
+		}
+	}
+	return nil, ierr.NewError("checkout session not found").Mark(ierr.ErrNotFound)
+}

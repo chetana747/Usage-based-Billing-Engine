@@ -1,0 +1,904 @@
+package ent
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/flexprice/flexprice/ent"
+	"github.com/flexprice/flexprice/ent/predicate"
+	"github.com/flexprice/flexprice/ent/price"
+	"github.com/flexprice/flexprice/internal/cache"
+	domainPrice "github.com/flexprice/flexprice/internal/domain/price"
+	"github.com/flexprice/flexprice/internal/dsl"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/flexprice/flexprice/internal/postgres"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/lib/pq"
+	"github.com/samber/lo"
+)
+
+type priceRepository struct {
+	client     postgres.IClient
+	log        *logger.Logger
+	queryOpts  PriceQueryOptions
+	redisCache cache.RedisCache
+}
+
+func NewPriceRepository(client postgres.IClient, log *logger.Logger, redisCache cache.RedisCache) domainPrice.Repository {
+	return &priceRepository{
+		client:     client,
+		log:        log,
+		queryOpts:  PriceQueryOptions{},
+		redisCache: redisCache,
+	}
+}
+
+func (r *priceRepository) Create(ctx context.Context, p *domainPrice.Price) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "creating price",
+		"price_id", p.ID,
+		"tenant_id", p.TenantID,
+		"lookup_key", p.LookupKey,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "create", map[string]interface{}{
+		"price_id":  p.ID,
+		"tenant_id": p.TenantID,
+
+		"lookup_key": p.LookupKey,
+	})
+	defer FinishSpan(span)
+
+	// Set environment ID from context if not already set
+	if p.EnvironmentID == "" {
+		p.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	// Create the price using the standard Ent API
+	priceBuilder := client.Price.Create().
+		SetID(p.ID).
+		SetTenantID(p.TenantID).
+		SetAmount(p.Amount).
+		SetCurrency(strings.ToLower(p.Currency)).
+		SetDisplayAmount(p.DisplayAmount).
+		SetPriceUnitType(p.PriceUnitType).
+		SetType(p.Type).
+		SetBillingPeriod(p.BillingPeriod).
+		SetBillingPeriodCount(p.BillingPeriodCount).
+		SetBillingModel(p.BillingModel).
+		SetDisplayName(p.DisplayName).
+		SetBillingCadence(p.BillingCadence).
+		SetNillableStartDate(p.StartDate).
+		SetNillableEndDate(p.EndDate).
+		SetNillableMeterID(lo.ToPtr(p.MeterID)).
+		SetInvoiceCadence(p.InvoiceCadence).
+		SetTrialPeriodDays(p.TrialPeriodDays).
+		SetNillableTierMode(lo.ToPtr(p.TierMode)).
+		SetNillableBucketSize(lo.EmptyableToPtr(p.BucketSize)).
+		SetTiers(p.ToEntTiers()).
+		SetPriceUnitTiers(domainPrice.ToEntTiersFromJSONB(p.PriceUnitTiers)).
+		SetNillableTransformQuantity(lo.ToPtr(types.TransformQuantity(p.TransformQuantity))).
+		SetLookupKey(p.LookupKey).
+		SetDescription(p.Description).
+		SetMetadata(map[string]string(p.Metadata)).
+		SetNillableMinQuantity(p.MinQuantity).
+		SetStatus(string(p.Status)).
+		SetCreatedAt(p.CreatedAt).
+		SetUpdatedAt(p.UpdatedAt).
+		SetCreatedBy(p.CreatedBy).
+		SetUpdatedBy(p.UpdatedBy).
+		SetEnvironmentID(p.EnvironmentID).
+		SetEntityType(p.EntityType).
+		SetEntityID(p.EntityID).
+		SetNillablePriceUnitID(p.PriceUnitID).
+		SetNillablePriceUnit(p.PriceUnit).
+		SetNillablePriceUnitAmount(p.PriceUnitAmount).
+		SetDisplayPriceUnitAmount(p.DisplayPriceUnitAmount).
+		SetNillableConversionRate(p.ConversionRate)
+
+	if p.GroupID != "" {
+		priceBuilder = priceBuilder.SetGroupID(p.GroupID)
+	}
+	if p.ParentPriceID != "" {
+		priceBuilder = priceBuilder.SetNillableParentPriceID(lo.EmptyableToPtr(p.ParentPriceID))
+	}
+
+	price, err := priceBuilder.Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsConstraintError(err) {
+			return ierr.WithError(err).
+				WithHint("A price with this identifier already exists").
+				WithReportableDetails(map[string]any{
+					"price_id":   p.ID,
+					"lookup_key": p.LookupKey,
+				}).
+				Mark(ierr.ErrAlreadyExists)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to create price").
+			Mark(ierr.ErrDatabase)
+	}
+
+	*p = *domainPrice.FromEnt(price)
+	return nil
+}
+
+func (r *priceRepository) Get(ctx context.Context, id string) (*domainPrice.Price, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "get", map[string]interface{}{
+		"price_id":  id,
+		"tenant_id": types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	// Try to get from cache first
+	if cachedPrice := r.GetCache(ctx, id); cachedPrice != nil {
+		return cachedPrice, nil
+	}
+
+	client := r.client.Reader(ctx)
+
+	r.log.Debug(ctx, "getting price",
+		"price_id", id,
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	p, err := client.Price.Query().
+		Where(
+			price.ID(id),
+			price.TenantID(types.GetTenantID(ctx)),
+			price.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHintf("Price with ID %s was not found", id).
+				WithReportableDetails(map[string]any{
+					"price_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get price").
+			Mark(ierr.ErrDatabase)
+	}
+
+	price := domainPrice.FromEnt(p)
+	r.SetCache(ctx, price)
+	return price, nil
+}
+
+func (r *priceRepository) List(ctx context.Context, filter *types.PriceFilter) ([]*domainPrice.Price, error) {
+	if filter == nil {
+		filter = &types.PriceFilter{
+			QueryFilter: types.NewDefaultQueryFilter(),
+		}
+	}
+
+	client := r.client.Reader(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "list", map[string]interface{}{
+		"tenant_id": types.GetTenantID(ctx),
+		"filter":    filter,
+	})
+	defer FinishSpan(span)
+
+	query := client.Price.Query()
+
+	// Apply entity-specific filters
+	query, err := r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to apply price filters").
+			Mark(ierr.ErrValidation)
+	}
+
+	// Apply common query options
+	query = ApplyQueryOptions(ctx, query, filter, r.queryOpts)
+
+	prices, err := query.All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list prices").
+			Mark(ierr.ErrDatabase)
+	}
+
+	return domainPrice.FromEntList(prices), nil
+}
+
+func (r *priceRepository) Count(ctx context.Context, filter *types.PriceFilter) (int, error) {
+	client := r.client.Reader(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "count", map[string]interface{}{
+		"tenant_id": types.GetTenantID(ctx),
+		"filter":    filter,
+	})
+	defer FinishSpan(span)
+
+	query := client.Price.Query()
+
+	query, err := r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		SetSpanError(span, err)
+		return 0, ierr.WithError(err).
+			WithHint("Failed to apply price filters").
+			Mark(ierr.ErrValidation)
+	}
+	query = ApplyBaseFilters(ctx, query, filter, r.queryOpts)
+
+	count, err := query.Count(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return 0, ierr.WithError(err).
+			WithHint("Failed to count prices").
+			Mark(ierr.ErrDatabase)
+	}
+
+	return count, nil
+}
+
+func (r *priceRepository) ListAll(ctx context.Context, filter *types.PriceFilter) ([]*domainPrice.Price, error) {
+	if filter == nil {
+		filter = types.NewNoLimitPriceFilter()
+	}
+
+	if filter.QueryFilter == nil {
+		filter.QueryFilter = types.NewNoLimitQueryFilter()
+	}
+
+	if err := filter.Validate(); err != nil {
+		return nil, ierr.WithError(err).
+			WithHint("Invalid filter parameters").
+			Mark(ierr.ErrValidation)
+	}
+
+	return r.List(ctx, filter)
+}
+
+func (r *priceRepository) Update(ctx context.Context, p *domainPrice.Price, bumpSequence bool) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "updating price",
+		"price_id", p.ID,
+		"tenant_id", p.TenantID,
+		"bump_sequence", bumpSequence,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "update", map[string]interface{}{
+		"price_id":      p.ID,
+		"tenant_id":     p.TenantID,
+		"bump_sequence": bumpSequence,
+	})
+	defer FinishSpan(span)
+
+	// Build the update query
+	update := client.Price.Update().
+		Where(
+			price.ID(p.ID),
+			price.TenantID(p.TenantID),
+			price.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		SetDisplayName(p.DisplayName).
+		SetLookupKey(p.LookupKey).
+		SetNillableEndDate(p.EndDate).
+		SetDescription(p.Description).
+		SetMetadata(map[string]string(p.Metadata)).
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx))
+
+	// Caller asserts a sync-relevant field is changing (i.e. end_date being
+	// set or cleared). Update prices.sequence for plan-price sync.
+	if bumpSequence {
+		nextSeq, err := r.nextPriceSequence(ctx)
+		if err != nil {
+			SetSpanError(span, err)
+			return err
+		}
+		update = update.SetSequence(nextSeq)
+		p.Sequence = nextSeq
+	}
+
+	// Handle group_id: empty string clears (NULL), non-empty sets the value
+	if p.GroupID == "" {
+		update = update.ClearGroupID()
+	} else {
+		update = update.SetNillableGroupID(lo.ToPtr(p.GroupID))
+	}
+
+	_, err := update.Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHintf("Price with ID %s was not found", p.ID).
+				WithReportableDetails(map[string]any{
+					"price_id": p.ID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to update price").
+			Mark(ierr.ErrDatabase)
+	}
+
+	r.DeleteCache(ctx, p.ID)
+	return nil
+}
+
+// nextPriceSequence fetches the next value from prices_sequence_seq, used to
+// stamp prices.sequence on state changes that subscriptions need to react to.
+// The sequence is defined in migrations/postgres/V4_prices_sequence.up.sql and
+// referenced as the DB-side DEFAULT on prices.sequence.
+func (r *priceRepository) nextPriceSequence(ctx context.Context) (int64, error) {
+	rows, err := r.client.Writer(ctx).QueryContext(ctx, "SELECT nextval('prices_sequence_seq')")
+	if err != nil {
+		return 0, ierr.WithError(err).
+			WithHint("Failed to advance price sequence").
+			Mark(ierr.ErrDatabase)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if rowsErr := rows.Err(); rowsErr != nil {
+			return 0, ierr.WithError(rowsErr).
+				WithHint("Failed to advance price sequence").
+				Mark(ierr.ErrDatabase)
+		}
+		return 0, ierr.NewError("no sequence value returned").Mark(ierr.ErrInternal)
+	}
+
+	var next int64
+	if scanErr := rows.Scan(&next); scanErr != nil {
+		return 0, ierr.WithError(scanErr).
+			WithHint("Failed to read price sequence value").
+			Mark(ierr.ErrDatabase)
+	}
+	return next, nil
+}
+
+func (r *priceRepository) Delete(ctx context.Context, id string) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "deleting price",
+		"price_id", id,
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "delete", map[string]interface{}{
+		"price_id":  id,
+		"tenant_id": types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	// Archival is a state change subs need to react to (the price drops out
+	// of the published set the sync looks at). Bump the sequence so the next
+	// sync sees the change.
+	nextSeq, err := r.nextPriceSequence(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, err = client.Price.Update().
+		Where(
+			price.ID(id),
+			price.TenantID(types.GetTenantID(ctx)),
+			price.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		SetSequence(nextSeq).
+		SetStatus(string(types.StatusArchived)).
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		Save(ctx)
+
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHintf("Price with ID %s was not found", id).
+				WithReportableDetails(map[string]any{
+					"price_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to delete price").
+			Mark(ierr.ErrDatabase)
+	}
+
+	r.DeleteCache(ctx, id)
+	return nil
+}
+
+func (r *priceRepository) CreateBulk(ctx context.Context, prices []*domainPrice.Price) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "bulk creating prices",
+		"count", len(prices),
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "create_bulk", map[string]interface{}{
+		"count":     len(prices),
+		"tenant_id": types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	if len(prices) == 0 {
+		return nil
+	}
+
+	builders := make([]*ent.PriceCreate, len(prices))
+	for i, p := range prices {
+		builders[i] = client.Price.Create().
+			SetID(p.ID).
+			SetTenantID(p.TenantID).
+			SetAmount(p.Amount).
+			SetCurrency(strings.ToLower(p.Currency)).
+			SetDisplayAmount(p.DisplayAmount).
+			SetEntityID(p.EntityID).
+			SetEntityType(p.EntityType).
+			SetType(p.Type).
+			SetBillingPeriod(p.BillingPeriod).
+			SetBillingPeriodCount(p.BillingPeriodCount).
+			SetBillingModel(p.BillingModel).
+			SetDisplayName(p.DisplayName).
+			SetBillingCadence(p.BillingCadence).
+			SetInvoiceCadence(p.InvoiceCadence).
+			SetNillableStartDate(p.StartDate).
+			SetNillableEndDate(p.EndDate).
+			SetTrialPeriodDays(p.TrialPeriodDays).
+			SetNillableMeterID(lo.ToPtr(p.MeterID)).
+			SetNillableTierMode(lo.ToPtr(p.TierMode)).
+			SetNillableBucketSize(lo.EmptyableToPtr(p.BucketSize)).
+			SetTiers(p.ToEntTiers()).
+			SetTransformQuantity(types.TransformQuantity(p.TransformQuantity)).
+			SetLookupKey(p.LookupKey).
+			SetDescription(p.Description).
+			SetMetadata(map[string]string(p.Metadata)).
+			SetEnvironmentID(p.EnvironmentID).
+			SetStatus(string(p.Status))
+		if p.MinQuantity != nil {
+			builders[i] = builders[i].SetMinQuantity(*p.MinQuantity)
+		}
+		if p.ParentPriceID != "" {
+			builders[i] = builders[i].SetNillableParentPriceID(lo.EmptyableToPtr(p.ParentPriceID))
+		}
+		builders[i] = builders[i].
+			SetCreatedAt(p.CreatedAt).
+			SetUpdatedAt(p.UpdatedAt).
+			SetCreatedBy(p.CreatedBy).
+			SetUpdatedBy(p.UpdatedBy).
+			SetNillableGroupID(lo.ToPtr(p.GroupID)).
+			SetPriceUnitType(p.PriceUnitType).
+			SetNillablePriceUnitID(p.PriceUnitID).
+			SetNillablePriceUnit(p.PriceUnit).
+			SetNillablePriceUnitAmount(p.PriceUnitAmount).
+			SetDisplayPriceUnitAmount(p.DisplayPriceUnitAmount).
+			SetNillableConversionRate(p.ConversionRate).
+			SetPriceUnitTiers(domainPrice.ToEntTiersFromJSONB(p.PriceUnitTiers))
+	}
+
+	_, err := client.Price.CreateBulk(builders...).Save(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to create prices in bulk").
+			Mark(ierr.ErrDatabase)
+	}
+
+	return nil
+}
+
+func (r *priceRepository) DeleteBulk(ctx context.Context, ids []string) error {
+	r.log.Debug(ctx, "bulk deleting prices",
+		"count", len(ids),
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "price", "delete_bulk", map[string]interface{}{
+		"count":     len(ids),
+		"tenant_id": types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Bump prices.sequence per row by inlining nextval() in the UPDATE so each
+	// archived price gets a distinct sequence value. Done via raw SQL because
+	// Ent's typed Update doesn't expose SQL function expressions.
+	query := `
+		UPDATE prices
+		SET sequence   = nextval('prices_sequence_seq'),
+		    status     = $1,
+		    updated_at = NOW(),
+		    updated_by = $2
+		WHERE id = ANY($3)
+		  AND tenant_id      = $4
+		  AND environment_id = $5
+	`
+	_, err := r.client.Writer(ctx).ExecContext(
+		ctx, query,
+		string(types.StatusArchived),
+		types.GetUserID(ctx),
+		pq.Array(ids),
+		types.GetTenantID(ctx),
+		types.GetEnvironmentID(ctx),
+	)
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to delete prices in bulk").
+			Mark(ierr.ErrDatabase)
+	}
+
+	return nil
+}
+
+// PriceQuery type alias for better readability
+type PriceQuery = *ent.PriceQuery
+
+// PriceQueryOptions implements BaseQueryOptions for price queries
+type PriceQueryOptions struct{}
+
+func (o PriceQueryOptions) ApplyTenantFilter(ctx context.Context, query PriceQuery) PriceQuery {
+	return query.Where(price.TenantID(types.GetTenantID(ctx)))
+}
+
+func (o PriceQueryOptions) ApplyEnvironmentFilter(ctx context.Context, query PriceQuery) PriceQuery {
+	environmentID := types.GetEnvironmentID(ctx)
+	if environmentID != "" {
+		return query.Where(price.EnvironmentID(environmentID))
+	}
+	return query
+}
+
+func (o PriceQueryOptions) ApplyStatusFilter(query PriceQuery, status string) PriceQuery {
+	if status == "" {
+		return query.Where(price.StatusEQ(string(types.StatusPublished)))
+	}
+	return query.Where(price.Status(status))
+}
+
+func (o PriceQueryOptions) ApplySortFilter(query PriceQuery, field string, order string) PriceQuery {
+	orderFunc := ent.Desc
+	if order == "asc" {
+		orderFunc = ent.Asc
+	}
+	return query.Order(orderFunc(o.GetFieldName(field)))
+}
+
+func (o PriceQueryOptions) ApplyPaginationFilter(query PriceQuery, limit int, offset int) PriceQuery {
+	query = query.Limit(limit)
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	return query
+}
+
+// GetFieldName returns the ent field name for price; resolves optional aliases then delegates to ent's ValidColumn so new schema fields are supported automatically.
+func (o PriceQueryOptions) GetFieldName(field string) string {
+	if field == "value" {
+		field = "amount"
+	}
+	if price.ValidColumn(field) {
+		return field
+	}
+	return ""
+}
+
+func (o PriceQueryOptions) applyEntityQueryOptions(_ context.Context, f *types.PriceFilter, query PriceQuery) (PriceQuery, error) {
+	if f == nil {
+		return query, nil
+	}
+
+	var err error
+
+	// Apply price IDs filter if specified
+	if len(f.PriceIDs) > 0 {
+		query = query.Where(price.IDIn(f.PriceIDs...))
+	}
+
+	// entity type filter
+	if f.EntityType != nil {
+		query = query.Where(price.EntityType(*f.EntityType))
+	}
+
+	// entity id filter
+	if len(f.EntityIDs) > 0 {
+		query = query.Where(price.EntityIDIn(f.EntityIDs...))
+	}
+
+	// meter id filter
+	if len(f.MeterIDs) > 0 {
+		query = query.Where(price.MeterIDIn(f.MeterIDs...))
+	}
+
+	// billing period filter
+	if len(f.BillingPeriods) > 0 {
+		periods := lo.Map(f.BillingPeriods, func(p types.BillingPeriod, _ int) types.BillingPeriod { return p })
+		query = query.Where(price.BillingPeriodIn(periods...))
+	}
+
+	// Apply time range filters if specified
+	if f.TimeRangeFilter != nil {
+		if f.StartTime != nil {
+			query = query.Where(price.CreatedAtGTE(*f.StartTime))
+		}
+		if f.EndTime != nil {
+			query = query.Where(price.CreatedAtLTE(*f.EndTime))
+		}
+	}
+
+	if f.UpdatedAfter != nil {
+		query = query.Where(price.UpdatedAtGTE(*f.UpdatedAfter))
+	}
+
+	if !f.AllowExpiredPrices {
+		now := time.Now().UTC()
+
+		// Filter for active prices:
+		// - Start date should be before or equal to current time (or null)
+		// - End date should be after current time (or null)
+		query = query.Where(
+			price.Or(
+				price.EndDateIsNil(),
+				price.EndDateGT(now),
+			),
+		)
+	}
+
+	// Apply start date less than filter if specified
+	if f.StartDateLT != nil {
+		query = query.Where(price.StartDateLT(*f.StartDateLT))
+	}
+
+	if f.Filters != nil {
+		query, err = dsl.ApplyFilters[PriceQuery, predicate.Price](
+			query,
+			f.Filters,
+			o.GetFieldResolver,
+			func(p dsl.Predicate) predicate.Price { return predicate.Price(p) },
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return query, nil
+}
+
+func (o PriceQueryOptions) GetFieldResolver(field string) (string, error) {
+	fieldName := o.GetFieldName(field)
+	if fieldName == "" {
+		return "", ierr.NewErrorf("unknown field name '%s' in price query", field).
+			Mark(ierr.ErrValidation)
+	}
+	return fieldName, nil
+}
+
+func (r *priceRepository) GetByPlanID(ctx context.Context, planID string) ([]*domainPrice.Price, error) {
+	client := r.client.Reader(ctx)
+
+	prices, err := client.Price.Query().
+		Where(price.EntityID(planID), price.Status(string(types.StatusPublished))).
+		All(ctx)
+	if err != nil {
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get prices by plan ID").
+			WithReportableDetails(map[string]interface{}{
+				"plan_id": planID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return domainPrice.FromEntList(prices), nil
+}
+
+func (r *priceRepository) SetCache(ctx context.Context, price *domainPrice.Price) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "price", "set", map[string]interface{}{
+		"price_id": price.ID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPrice, price.ID)
+	r.redisCache.Set(ctx, cacheKey, price, cache.ExpiryDefaultRedis)
+}
+
+func (r *priceRepository) GetCache(ctx context.Context, id string) *domainPrice.Price {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "price", "get", map[string]interface{}{
+		"price_id": id,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPrice, id)
+	value, found := r.redisCache.Get(ctx, cacheKey)
+	if !found {
+		return nil
+	}
+	p, ok := cache.UnmarshalCacheValue[domainPrice.Price](value)
+	if !ok {
+		return nil
+	}
+	return p
+}
+
+func (r *priceRepository) DeleteCache(ctx context.Context, priceID string) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "price", "delete", map[string]interface{}{
+		"price_id": priceID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPrice, priceID)
+	r.redisCache.Delete(ctx, cacheKey)
+}
+
+// Grouping cruds
+
+func (r *priceRepository) GetByGroupIDs(ctx context.Context, groupIDs []string) ([]*domainPrice.Price, error) {
+	client := r.client.Reader(ctx)
+
+	prices, err := client.Price.Query().
+		Where(price.GroupIDIn(groupIDs...)).
+		All(ctx)
+	if err != nil {
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get prices by group IDs").
+			WithReportableDetails(map[string]interface{}{
+				"group_ids": groupIDs,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return domainPrice.FromEntList(prices), nil
+}
+
+// ListByIDs returns the prices whose ids are in ids; missing ids are absent
+// from the result, not an error. Archived prices are included: line items can
+// reference prices that were archived after billing. Cached prices are read
+// with one bulk redis call; only the misses hit the database.
+func (r *priceRepository) ListByIDs(ctx context.Context, ids []string) ([]*domainPrice.Price, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	span := StartRepositorySpan(ctx, "price", "list_by_ids", map[string]interface{}{
+		"price_ids_count": len(ids),
+	})
+	defer FinishSpan(span)
+
+	ids = lo.Uniq(lo.Filter(ids, func(id string, _ int) bool { return id != "" }))
+
+	keys := make([]string, len(ids))
+	idByKey := make(map[string]string, len(ids))
+	for i, id := range ids {
+		keys[i] = cache.GenerateKey(ctx, cache.PrefixPrice, id)
+		idByKey[keys[i]] = id
+	}
+
+	cacheSpan, ctx := cache.StartRedisCacheSpan(ctx, "price", "get_bulk", map[string]interface{}{
+		"price_ids_count": len(ids),
+	})
+	foundValues, missingKeys := r.redisCache.GetBulk(ctx, keys)
+	cache.FinishSpan(cacheSpan)
+
+	result := make([]*domainPrice.Price, 0, len(ids))
+	missingIDs := make([]string, 0, len(missingKeys))
+	for _, key := range keys {
+		value, ok := foundValues[key]
+		if !ok {
+			continue
+		}
+		if p, ok := cache.UnmarshalCacheValue[domainPrice.Price](value); ok {
+			result = append(result, p)
+			continue
+		}
+		// A corrupt cache entry falls back to the database.
+		missingIDs = append(missingIDs, idByKey[key])
+	}
+	for _, key := range missingKeys {
+		missingIDs = append(missingIDs, idByKey[key])
+	}
+
+	if len(missingIDs) == 0 {
+		SetSpanSuccess(span)
+		return result, nil
+	}
+
+	fetched, err := r.client.Reader(ctx).Price.Query().
+		Where(
+			price.IDIn(missingIDs...),
+			price.TenantID(types.GetTenantID(ctx)),
+			price.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list prices by ids").
+			WithReportableDetails(map[string]interface{}{"price_ids": missingIDs}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	for _, p := range domainPrice.FromEntList(fetched) {
+		r.SetCache(ctx, p)
+		result = append(result, p)
+	}
+
+	SetSpanSuccess(span)
+	return result, nil
+}
+
+func (r *priceRepository) ClearByGroupID(ctx context.Context, groupID string) error {
+	client := r.client.Writer(ctx)
+
+	_, err := client.Price.Update().
+		Where(
+			price.GroupID(groupID),
+			price.TenantID(types.GetTenantID(ctx)),
+			price.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		ClearGroupID().
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		Save(ctx)
+	if err != nil {
+		return ierr.WithError(err).
+			WithHint("Failed to clear group ID").
+			WithReportableDetails(map[string]interface{}{
+				"group_id": groupID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return nil
+}
+
+func (r *priceRepository) GetByLookupKey(ctx context.Context, lookupKey string) (*domainPrice.Price, error) {
+	client := r.client.Reader(ctx)
+
+	price, err := client.Price.Query().
+		Where(price.LookupKey(lookupKey)).
+		Where(price.TenantID(types.GetTenantID(ctx)),
+			price.EnvironmentID(types.GetEnvironmentID(ctx)),
+			price.Status(string(types.StatusPublished)),
+			price.EndDateIsNil(),
+		).
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHintf("Price with lookup key %s was not found", lookupKey).
+				WithReportableDetails(map[string]interface{}{
+					"lookup_key": lookupKey,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get price by lookup key").
+			WithReportableDetails(map[string]interface{}{
+				"lookup_key": lookupKey,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+	return domainPrice.FromEnt(price), nil
+}

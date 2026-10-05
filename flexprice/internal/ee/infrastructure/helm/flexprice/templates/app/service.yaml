@@ -1,0 +1,35 @@
+{{- if .Values.api.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "flexprice.fullname" . }}-api
+  labels:
+    {{- include "flexprice.componentLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+  {{- $parallel := include "flexprice.gceParallelEnabled" . }}
+  {{- $providerGce := include "flexprice.legacyGceEnabled" . }}
+  {{- $sharedGce := and $parallel (not .Values.gceIngress.ownService) }}
+  {{- if or $providerGce $sharedGce }}
+  annotations:
+    # GCE-native ingress needs a Network Endpoint Group (not kube-proxy
+    # iptables/IPVS) to route directly to pod IPs, and the BackendConfig
+    # link to pick up the health check / timeout / Cloud Armor settings.
+    # The nginx path is untouched.
+    cloud.google.com/neg: '{"ingress": true}'
+    {{- if $providerGce }}
+    beta.cloud.google.com/backend-config: '{"default": "{{ include "flexprice.fullname" . }}-api-backend"}'
+    {{- else }}
+    beta.cloud.google.com/backend-config: '{"default": "{{ include "flexprice.gceIngressName" . }}"}'
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "flexprice.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+{{- end }}
+

@@ -1,0 +1,1414 @@
+package ent
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/flexprice/flexprice/ent"
+	"github.com/flexprice/flexprice/ent/coupon"
+	"github.com/flexprice/flexprice/ent/couponassociation"
+	"github.com/flexprice/flexprice/ent/predicate"
+	"github.com/flexprice/flexprice/ent/subscription"
+	"github.com/flexprice/flexprice/ent/subscriptionlineitem"
+	"github.com/flexprice/flexprice/ent/subscriptionpause"
+	"github.com/flexprice/flexprice/internal/cache"
+	domainSub "github.com/flexprice/flexprice/internal/domain/subscription"
+	"github.com/flexprice/flexprice/internal/dsl"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/flexprice/flexprice/internal/postgres"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
+	"github.com/shopspring/decimal"
+)
+
+type subscriptionRepository struct {
+	client     postgres.IClient
+	logger     *logger.Logger
+	queryOpts  SubscriptionQueryOptions
+	redisCache cache.RedisCache
+}
+
+func NewSubscriptionRepository(client postgres.IClient, logger *logger.Logger, redisCache cache.RedisCache) domainSub.Repository {
+	return &subscriptionRepository{
+		client:     client,
+		logger:     logger,
+		queryOpts:  SubscriptionQueryOptions{},
+		redisCache: redisCache,
+	}
+}
+
+func (r *subscriptionRepository) Create(ctx context.Context, sub *domainSub.Subscription) error {
+	client := r.client.Writer(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "create", map[string]interface{}{
+		"subscription_id": sub.ID,
+		"customer_id":     sub.CustomerID,
+		"plan_id":         sub.PlanID,
+	})
+	defer FinishSpan(span)
+
+	// Set environment ID from context if not already set
+	if sub.EnvironmentID == "" {
+		sub.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	subscription, err := client.Subscription.Create().
+		SetID(sub.ID).
+		SetTenantID(sub.TenantID).
+		SetLookupKey(sub.LookupKey).
+		SetCustomerID(sub.CustomerID).
+		SetPlanID(sub.PlanID).
+		SetSubscriptionType(sub.SubscriptionType).
+		SetSubscriptionStatus(sub.SubscriptionStatus).
+		SetCurrency(sub.Currency).
+		SetBillingAnchor(sub.BillingAnchor).
+		SetStartDate(sub.StartDate).
+		SetNillableEndDate(sub.EndDate).
+		SetCurrentPeriodStart(sub.CurrentPeriodStart).
+		SetCurrentPeriodEnd(sub.CurrentPeriodEnd).
+		SetNillableCancelledAt(sub.CancelledAt).
+		SetNillableCancelAt(sub.CancelAt).
+		SetCancelAtPeriodEnd(sub.CancelAtPeriodEnd).
+		SetNillableTrialStart(sub.TrialStart).
+		SetNillableTrialEnd(sub.TrialEnd).
+		SetBillingCadence(sub.BillingCadence).
+		SetBillingPeriod(sub.BillingPeriod).
+		SetBillingPeriodCount(sub.BillingPeriodCount).
+		SetBillingCycle(sub.BillingCycle).
+		SetNillableCommitmentAmount(sub.CommitmentAmount).
+		SetNillableOverageFactor(sub.OverageFactor).
+		SetNillableAutoInvoiceThreshold(sub.AutoInvoiceThreshold).
+		SetNillableCommitmentDuration(sub.CommitmentDuration).
+		SetStatus(string(sub.Status)).
+		SetCreatedBy(sub.CreatedBy).
+		SetUpdatedBy(sub.UpdatedBy).
+		SetEnvironmentID(sub.EnvironmentID).
+		SetTimezone(sub.Timezone).
+		SetProrationBehavior(sub.ProrationBehavior).
+		SetLineItemGrouping(sub.LineItemGrouping.Default()).
+		SetVersion(1).
+		SetMetadata(sub.Metadata).
+		SetPaymentBehavior(types.PaymentBehavior(sub.PaymentBehavior)).
+		SetCollectionMethod(types.CollectionMethod(sub.CollectionMethod)).
+		SetNillableGatewayPaymentMethodID(sub.GatewayPaymentMethodID).
+		SetEnableTrueUp(sub.EnableTrueUp).
+		SetNillableInvoicingCustomerID(sub.InvoicingCustomerID).
+		SetNillableParentSubscriptionID(sub.ParentSubscriptionID).
+		SetNillablePaymentTerms(sub.PaymentTerms).
+		SetSyncedPriceSequence(sub.SyncedPriceSequence).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return fmt.Errorf("failed to create subscription: %w", err)
+	}
+
+	// Update the input subscription with created data
+	SetSpanSuccess(span)
+	*sub = *domainSub.GetSubscriptionFromEnt(subscription)
+	return nil
+}
+
+func (r *subscriptionRepository) Get(ctx context.Context, id string) (*domainSub.Subscription, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "get", map[string]interface{}{
+		"subscription_id": id,
+	})
+	defer FinishSpan(span)
+
+	// Try to get from cache first
+	if cachedSub := r.GetCache(ctx, id); cachedSub != nil {
+		return cachedSub, nil
+	}
+
+	client := r.client.Reader(ctx)
+
+	sub, err := client.Subscription.Query().
+		Where(
+			subscription.ID(id),
+			subscription.TenantID(types.GetTenantID(ctx)),
+			subscription.Status(string(types.StatusPublished)),
+			subscription.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return nil, ierr.NewError("subscription not found").
+				WithHint("Subscription not found").
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get subscription").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	subData := domainSub.GetSubscriptionFromEnt(sub)
+	r.SetCache(ctx, subData)
+	return subData, nil
+}
+
+// GetForUpdate row-locks the subscription and bypasses cache (cache can't hold a lock).
+func (r *subscriptionRepository) GetForUpdate(ctx context.Context, id string) (*domainSub.Subscription, error) {
+	span := StartRepositorySpan(ctx, "subscription", "get_for_update", map[string]interface{}{
+		"subscription_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+	tenantID := types.GetTenantID(ctx)
+	environmentID := types.GetEnvironmentID(ctx)
+
+	lockQuery := `SELECT id FROM subscriptions WHERE id = $1 AND tenant_id = $2 AND environment_id = $3 AND status = $4 FOR UPDATE`
+	rows, err := client.QueryContext(ctx, lockQuery, id, tenantID, environmentID, string(types.StatusPublished))
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).WithHint("subscription lock failed").Mark(ierr.ErrDatabase)
+	}
+	// Check and close before running another query on the same connection.
+	hasRow := rows.Next()
+	rowErr := rows.Err()
+	rows.Close() // #nosec G104 -- best-effort, error non-fatal
+	if rowErr != nil {
+		SetSpanError(span, rowErr)
+		return nil, ierr.WithError(rowErr).WithHint("subscription lock failed").Mark(ierr.ErrDatabase)
+	}
+	if !hasRow {
+		return nil, ierr.NewError("subscription not found").
+			WithHint("Subscription not found").
+			WithReportableDetails(map[string]any{"id": id}).
+			Mark(ierr.ErrNotFound)
+	}
+
+	// Read on the same connection, so this sees the locked row.
+	sub, err := client.Subscription.Query().
+		Where(
+			subscription.ID(id),
+			subscription.TenantID(tenantID),
+			subscription.Status(string(types.StatusPublished)),
+			subscription.EnvironmentID(environmentID),
+		).
+		Only(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.NewError("subscription not found").
+				WithHint("Subscription not found").
+				WithReportableDetails(map[string]any{"id": id}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get subscription").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return domainSub.GetSubscriptionFromEnt(sub), nil
+}
+
+func (r *subscriptionRepository) Update(ctx context.Context, sub *domainSub.Subscription) error {
+	client := r.client.Writer(ctx)
+	now := time.Now().UTC()
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "update", map[string]interface{}{
+		"subscription_id": sub.ID,
+		"version":         sub.Version,
+	})
+	defer FinishSpan(span)
+
+	query := client.Subscription.Update().
+		Where(
+			subscription.ID(sub.ID),
+			subscription.TenantID(types.GetTenantID(ctx)),
+			subscription.Status(string(types.StatusPublished)),
+			subscription.EnvironmentID(types.GetEnvironmentID(ctx)),
+		)
+
+	query.
+		SetLookupKey(sub.LookupKey).
+		SetStartDate(sub.StartDate).
+		SetBillingAnchor(sub.BillingAnchor).
+		SetSubscriptionStatus(sub.SubscriptionStatus).
+		SetSubscriptionType(sub.SubscriptionType).
+		SetCurrentPeriodStart(sub.CurrentPeriodStart).
+		SetCurrentPeriodEnd(sub.CurrentPeriodEnd).
+		SetPauseStatus(sub.PauseStatus).
+		SetCancelAtPeriodEnd(sub.CancelAtPeriodEnd).
+		SetPaymentBehavior(types.PaymentBehavior(sub.PaymentBehavior)).
+		SetCollectionMethod(types.CollectionMethod(sub.CollectionMethod)).
+		SetNillableGatewayPaymentMethodID(sub.GatewayPaymentMethodID).
+		SetNillableInvoicingCustomerID(sub.InvoicingCustomerID).
+		SetUpdatedAt(now).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		SetMetadata(sub.Metadata)
+
+	// Only set when populated: callers that build a partial subscription for
+	// update must not silently reset the tenant's grouping choice.
+	if sub.LineItemGrouping != "" {
+		query.SetLineItemGrouping(sub.LineItemGrouping)
+	}
+
+	// Handle nullable payment_terms - explicitly clear if nil
+	if sub.PaymentTerms != nil {
+		query.SetPaymentTerms(*sub.PaymentTerms)
+	} else {
+		query.ClearPaymentTerms()
+	}
+
+	// Handle nullable date fields - explicitly clear if nil
+	if sub.CancelledAt != nil {
+		query.SetCancelledAt(*sub.CancelledAt)
+	} else {
+		query.ClearCancelledAt()
+	}
+
+	if sub.CancelAt != nil {
+		query.SetCancelAt(*sub.CancelAt)
+	} else {
+		query.ClearCancelAt()
+	}
+
+	if sub.EndDate != nil {
+		query.SetEndDate(*sub.EndDate)
+	} else {
+		query.ClearEndDate()
+	}
+
+	if sub.ActivePauseID != nil {
+		query.SetActivePauseID(*sub.ActivePauseID)
+	} else {
+		query.ClearActivePauseID()
+	}
+
+	if sub.ParentSubscriptionID != nil {
+		query.SetParentSubscriptionID(*sub.ParentSubscriptionID)
+	} else {
+		query.ClearParentSubscriptionID()
+	}
+
+	// Execute update
+	_, err := query.Save(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		r.logger.Error(ctx, "failed to update subscription", "error", err, "subscription_id", sub.ID)
+		return ierr.WithError(err).
+			WithHint("Failed to update subscription").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	r.DeleteCache(ctx, sub.ID)
+	return nil
+}
+
+// UpdatePlan writes plan_id and nothing else, so a plan move can never ride along
+// with an unrelated update carrying a stale (possibly cached) subscription.
+func (r *subscriptionRepository) UpdatePlan(ctx context.Context, id string, planID string) error {
+	span := StartRepositorySpan(ctx, "subscription", "update_plan", map[string]interface{}{
+		"subscription_id": id,
+		"plan_id":         planID,
+	})
+	defer FinishSpan(span)
+
+	if planID == "" {
+		return ierr.NewError("plan_id is required").
+			WithHint("A subscription cannot be moved to an empty plan").
+			WithReportableDetails(map[string]any{"subscription_id": id}).
+			Mark(ierr.ErrValidation)
+	}
+
+	affected, err := r.client.Writer(ctx).Subscription.Update().
+		Where(
+			subscription.ID(id),
+			subscription.TenantID(types.GetTenantID(ctx)),
+			subscription.Status(string(types.StatusPublished)),
+			subscription.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		SetPlanID(planID).
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		Save(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		r.logger.Error(ctx, "failed to update subscription plan", "error", err, "subscription_id", id, "plan_id", planID)
+		return ierr.WithError(err).
+			WithHint("Failed to change the subscription's plan").
+			Mark(ierr.ErrDatabase)
+	}
+	if affected == 0 {
+		return ierr.NewError("subscription not found").
+			WithHint("Subscription not found").
+			WithReportableDetails(map[string]any{"subscription_id": id}).
+			Mark(ierr.ErrNotFound)
+	}
+
+	SetSpanSuccess(span)
+	r.DeleteCache(ctx, id)
+	return nil
+}
+
+func (r *subscriptionRepository) Delete(ctx context.Context, id string) error {
+	client := r.client.Writer(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "delete", map[string]interface{}{
+		"subscription_id": id,
+	})
+	defer FinishSpan(span)
+
+	err := client.Subscription.UpdateOneID(id).
+		Where(
+			subscription.TenantID(types.GetTenantID(ctx)),
+			subscription.Status(string(types.StatusPublished)),
+			subscription.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		SetStatus(string(types.StatusArchived)).
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		Exec(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+
+		if ent.IsNotFound(err) {
+			return ierr.NewError("subscription not found").
+				WithHint("Subscription not found").
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to delete subscription").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	r.DeleteCache(ctx, id)
+	return nil
+}
+
+// List retrieves a list of subscriptions based on the provided filter
+func (r *subscriptionRepository) List(ctx context.Context, filter *types.SubscriptionFilter) ([]*domainSub.Subscription, error) {
+	r.logger.Debug(ctx, "listing subscriptions", "filter", filter)
+
+	if filter == nil {
+		filter = &types.SubscriptionFilter{
+			QueryFilter: types.NewDefaultQueryFilter(),
+		}
+	}
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "list", map[string]interface{}{
+		"filter": filter,
+	})
+	defer FinishSpan(span)
+
+	if err := filter.Validate(); err != nil {
+		SetSpanError(span, err)
+		return nil, fmt.Errorf("invalid filter: %w", err)
+	}
+
+	client := r.client.Reader(ctx)
+	query := client.Subscription.Query()
+
+	if filter.WithLineItems {
+		query = query.WithLineItems(func(q *ent.SubscriptionLineItemQuery) {
+			q.Where(subscriptionlineitem.Status(string(types.StatusPublished)))
+		})
+	}
+
+	if filter.WithCouponAssociations {
+		query = query.WithCouponAssociations(func(q *ent.CouponAssociationQuery) {
+			q.Where(couponassociation.Status(string(types.StatusPublished))).
+				WithCoupon(func(cq *ent.CouponQuery) {
+					cq.Where(coupon.Status(string(types.StatusPublished)))
+				})
+		})
+	}
+
+	// Apply entity-specific filters
+	query, err := r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to apply query options").
+			Mark(ierr.ErrDatabase)
+	}
+
+	// Apply common query options
+	query = ApplyQueryOptions(ctx, query, filter, r.queryOpts)
+
+	subs, err := query.All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		r.logger.Error(ctx, "failed to list subscriptions", "error", err)
+		return nil, fmt.Errorf("listing subscriptions: %w", err)
+	}
+
+	// Convert to domain model
+	result := make([]*domainSub.Subscription, len(subs))
+	for i, sub := range subs {
+		result[i] = domainSub.GetSubscriptionFromEnt(sub)
+	}
+
+	SetSpanSuccess(span)
+	return result, nil
+}
+
+// ListActiveSubscriptionsDueForRenewal retrieves all active subscriptions that are due for renewal in 24 hours
+func (r *subscriptionRepository) ListSubscriptionsDueForRenewal(ctx context.Context, referenceTime time.Time) ([]*domainSub.Subscription, error) {
+	referenceTime = referenceTime.UTC()
+	targetTime := referenceTime.Add(24 * time.Hour)
+
+	// Half-open window [targetTime-15m, targetTime) matches the 15-minute
+	// schedule interval exactly. The workflow passes its scheduled start
+	// time, so each run covers a non-overlapping 15-minute slice.
+	windowStart := targetTime.Add(-15 * time.Minute)
+
+	subs, err := r.client.Reader(ctx).Subscription.Query().
+		Where(
+			subscription.And(
+				subscription.SubscriptionStatusEQ(types.SubscriptionStatusActive),
+				subscription.StatusEQ(string(types.StatusPublished)),
+				subscription.CurrentPeriodEndGTE(windowStart),
+				subscription.CurrentPeriodEndLT(targetTime),
+				subscription.CancelAtPeriodEndEQ(false),
+			),
+		).All(ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to domain model
+	result := make([]*domainSub.Subscription, len(subs))
+	for i, sub := range subs {
+		result[i] = domainSub.GetSubscriptionFromEnt(sub)
+	}
+
+	return result, nil
+}
+
+// ListAll retrieves all subscriptions without pagination
+func (r *subscriptionRepository) ListAll(ctx context.Context, filter *types.SubscriptionFilter) ([]*domainSub.Subscription, error) {
+	if filter == nil {
+		filter = &types.SubscriptionFilter{
+			QueryFilter: types.NewNoLimitQueryFilter(),
+		}
+	} else {
+		// Override pagination settings for ListAll
+		filter.QueryFilter = types.NewNoLimitQueryFilter()
+	}
+
+	return r.List(ctx, filter)
+}
+
+// GetSubscriptionsForBillingPeriodUpdate lists subscriptions across all tenants for billing-period
+// maintenance (cron/Temporal). NOTE: expensive; intended for scheduled jobs only.
+func (r *subscriptionRepository) GetSubscriptionsForBillingPeriodUpdate(ctx context.Context, filter *types.SubscriptionFilter) ([]*domainSub.Subscription, error) {
+	r.logger.Debug(ctx, "listing subscriptions for billing period update", "filter", filter)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "get_subscriptions_for_billing_period_update", map[string]interface{}{
+		"filter": filter,
+	})
+	defer FinishSpan(span)
+
+	if filter == nil {
+		filter = &types.SubscriptionFilter{
+			QueryFilter: types.NewDefaultQueryFilter(),
+		}
+	}
+
+	if err := filter.Validate(); err != nil {
+		SetSpanError(span, err)
+		return nil, fmt.Errorf("invalid filter: %w", err)
+	}
+
+	client := r.client.Reader(ctx)
+	query := client.Subscription.Query()
+
+	// Apply entity-specific filters
+	query, err := r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to apply query options").
+			Mark(ierr.ErrDatabase)
+	}
+
+	// Apply all query options except tenant filter
+	query = ApplySorting(query, filter, r.queryOpts)
+	query = ApplyPagination(query, filter, r.queryOpts)
+	query = r.queryOpts.ApplyStatusFilter(query, filter.GetStatus())
+
+	subs, err := query.All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		r.logger.Error(ctx, "failed to list subscriptions", "error", err)
+		return nil, fmt.Errorf("listing subscriptions: %w", err)
+	}
+
+	// Convert to domain model
+	result := make([]*domainSub.Subscription, len(subs))
+	for i, sub := range subs {
+		result[i] = domainSub.GetSubscriptionFromEnt(sub)
+	}
+
+	SetSpanSuccess(span)
+	return result, nil
+}
+
+// Count returns the total number of subscriptions based on the provided filter
+func (r *subscriptionRepository) Count(ctx context.Context, filter *types.SubscriptionFilter) (int, error) {
+	r.logger.Debug(ctx, "starting subscription repository Count",
+		"filter", filter,
+		"tenant_id", types.GetTenantID(ctx),
+		"environment_id", types.GetEnvironmentID(ctx))
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "count", map[string]interface{}{
+		"filter": filter,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	query := client.Subscription.Query()
+	query = ApplyBaseFilters(ctx, query, filter, r.queryOpts)
+
+	var err error
+	query, err = r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+	if err != nil {
+		SetSpanError(span, err)
+		return 0, ierr.WithError(err).
+			WithHint("Failed to apply query options").
+			Mark(ierr.ErrDatabase)
+	}
+
+	count, err := query.Count(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return 0, fmt.Errorf("failed to count subscriptions: %w", err)
+	}
+
+	SetSpanSuccess(span)
+	return count, nil
+}
+
+// Query option methods
+// SubscriptionQuery type alias for better readability
+type SubscriptionQuery = *ent.SubscriptionQuery
+
+// SubscriptionQueryOptions implements BaseQueryOptions for subscription queries
+type SubscriptionQueryOptions struct{}
+
+func (o SubscriptionQueryOptions) ApplyTenantFilter(ctx context.Context, query SubscriptionQuery) SubscriptionQuery {
+	return query.Where(subscription.TenantID(types.GetTenantID(ctx)))
+}
+
+func (o SubscriptionQueryOptions) ApplyEnvironmentFilter(ctx context.Context, query SubscriptionQuery) SubscriptionQuery {
+	environmentID := types.GetEnvironmentID(ctx)
+	if environmentID != "" {
+		return query.Where(subscription.EnvironmentIDEQ(environmentID))
+	}
+	return query
+}
+
+func (o SubscriptionQueryOptions) ApplyStatusFilter(query SubscriptionQuery, status string) SubscriptionQuery {
+	if status == "" {
+		return query.Where(subscription.StatusEQ(string(types.StatusPublished)))
+	}
+	return query.Where(subscription.Status(status))
+}
+
+func (o SubscriptionQueryOptions) ApplySortFilter(query SubscriptionQuery, field string, order string) SubscriptionQuery {
+	orderFunc := ent.Desc
+	if order == "asc" {
+		orderFunc = ent.Asc
+	}
+	return query.Order(orderFunc(o.GetFieldName(field)))
+}
+
+func (o SubscriptionQueryOptions) ApplyPaginationFilter(query SubscriptionQuery, limit int, offset int) SubscriptionQuery {
+	query = query.Limit(limit)
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	return query
+}
+
+// GetFieldName returns the ent field name for subscription; delegates to ent's ValidColumn so new schema fields are supported automatically.
+func (o SubscriptionQueryOptions) GetFieldName(field string) string {
+	if subscription.ValidColumn(field) {
+		return field
+	}
+	return ""
+}
+
+func (o SubscriptionQueryOptions) GetFieldResolver(field string) (string, error) {
+	fieldName := o.GetFieldName(field)
+	if fieldName == "" {
+		return "", ierr.NewErrorf("unknown field name '%s' in subscription query", field).
+			Mark(ierr.ErrValidation)
+	}
+	return fieldName, nil
+}
+
+// filtersConstrainSubscriptionStatus reports whether any DSL filter targets subscription_status,
+// so we should not also apply the default "active only" predicate (which would contradict e.g. draft).
+func (o SubscriptionQueryOptions) filtersConstrainSubscriptionStatus(filters []*types.FilterCondition) bool {
+	for _, fc := range filters {
+		if fc == nil || fc.Field == nil {
+			continue
+		}
+		if o.GetFieldName(*fc.Field) == subscription.FieldSubscriptionStatus {
+			return true
+		}
+	}
+	return false
+}
+
+// applyEntityQueryOptions applies subscription-specific filters to the query
+func (o *SubscriptionQueryOptions) applyEntityQueryOptions(_ context.Context, f *types.SubscriptionFilter, query SubscriptionQuery) (SubscriptionQuery, error) {
+	var err error
+	if f == nil {
+		return query, nil
+	}
+
+	// Apply subscription IDs filter
+	if len(f.SubscriptionIDs) > 0 {
+		query = query.Where(subscription.IDIn(f.SubscriptionIDs...))
+	}
+
+	// Apply parent subscription IDs filter
+	if len(f.ParentSubscriptionIDs) > 0 {
+		query = query.Where(subscription.ParentSubscriptionIDIn(f.ParentSubscriptionIDs...))
+	}
+
+	// Apply subscription type filter
+	if len(f.SubscriptionTypes) > 0 {
+		query = query.Where(subscription.SubscriptionTypeIn(f.SubscriptionTypes...))
+	}
+
+	// Apply customer filter
+	if f.CustomerID != "" {
+		query = query.Where(subscription.CustomerID(f.CustomerID))
+	}
+
+	// Apply customer IDs filter
+	if len(f.CustomerIDs) > 0 {
+		query = query.Where(subscription.CustomerIDIn(f.CustomerIDs...))
+	}
+
+	// Apply invoicing customer filter
+	if len(f.InvoicingCustomerIDs) > 0 {
+		query = query.Where(subscription.InvoicingCustomerIDIn(f.InvoicingCustomerIDs...))
+	}
+
+	// Apply plan filter
+	if f.PlanID != "" {
+		query = query.Where(subscription.PlanID(f.PlanID))
+	}
+
+	// Apply subscription status filter
+	if len(f.SubscriptionStatus) > 0 {
+		query = query.Where(subscription.SubscriptionStatusIn(f.SubscriptionStatus...))
+	}
+
+	// Default to active when the client did not constrain subscription_status (neither top-level nor DSL filters).
+	if f.SubscriptionStatus == nil && !o.filtersConstrainSubscriptionStatus(f.Filters) {
+		query = query.Where(subscription.SubscriptionStatusEQ(types.SubscriptionStatusActive))
+	}
+
+	// Apply billing cadence filter
+	if len(f.BillingCadence) > 0 {
+		query = query.Where(subscription.BillingCadenceIn(f.BillingCadence...))
+	}
+
+	// Apply billing period filter
+	if len(f.BillingPeriod) > 0 {
+		query = query.Where(subscription.BillingPeriodIn(f.BillingPeriod...))
+	}
+
+	// Apply subscription status not in filter
+	if len(f.SubscriptionStatusNotIn) > 0 {
+		query = query.Where(subscription.SubscriptionStatusNotIn(f.SubscriptionStatusNotIn...))
+	}
+
+	// Apply active at filter
+	if f.ActiveAt != nil {
+		query = query.Where(
+			subscription.And(
+				subscription.StartDateLTE(*f.ActiveAt),
+				subscription.Or(
+					subscription.EndDateGT(*f.ActiveAt),
+					subscription.EndDateIsNil(),
+				),
+			),
+		)
+	}
+
+	// Apply time range filters
+	if f.TimeRangeFilter != nil {
+		if f.TimeRangeFilter.StartTime != nil {
+			query = query.Where(subscription.CurrentPeriodStartGTE(*f.TimeRangeFilter.StartTime))
+		}
+		if f.TimeRangeFilter.EndTime != nil {
+			query = query.Where(subscription.CurrentPeriodEndLTE(*f.TimeRangeFilter.EndTime))
+		}
+	}
+
+	// Period / cancellation cutoff for billing updates (preferred for crons)
+	if f.EffectiveDateForUpdate != nil {
+		d := *f.EffectiveDateForUpdate
+		query = query.Where(
+			subscription.Or(
+				subscription.CurrentPeriodEndLTE(d),
+				subscription.And(
+					subscription.CancelAtNotNil(),
+					subscription.CancelAtLTE(d),
+				),
+			),
+		)
+	}
+
+	if f.TrialEndDueLTE != nil {
+		query = query.Where(
+			subscription.And(
+				subscription.TrialEndNotNil(),
+				subscription.TrialEndLTE(lo.FromPtr(f.TrialEndDueLTE)),
+			),
+		)
+	}
+
+	if f.Filters != nil {
+		query, err = dsl.ApplyFilters[SubscriptionQuery, predicate.Subscription](
+			query,
+			f.Filters,
+			o.GetFieldResolver,
+			func(p dsl.Predicate) predicate.Subscription { return predicate.Subscription(p) },
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Apply sorts using the generic function
+	if f.Sort != nil {
+		query, err = dsl.ApplySorts[SubscriptionQuery, subscription.OrderOption](
+			query,
+			f.Sort,
+			o.GetFieldResolver,
+			func(o dsl.OrderFunc) subscription.OrderOption { return subscription.OrderOption(o) },
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return query, nil
+}
+
+// Add new methods for line items
+func (r *subscriptionRepository) CreateWithLineItems(ctx context.Context, sub *domainSub.Subscription, items []*domainSub.SubscriptionLineItem) error {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "create_with_line_items", map[string]interface{}{
+		"subscription_id": sub.ID,
+		"item_count":      len(items),
+	})
+	defer FinishSpan(span)
+
+	err := r.client.WithTx(ctx, func(ctx context.Context) error {
+		// Create subscription first
+		if err := r.Create(ctx, sub); err != nil {
+			return fmt.Errorf("failed to create subscription: %w", err)
+		}
+
+		// Create line items
+		client := r.client.Writer(ctx)
+		bulk := make([]*ent.SubscriptionLineItemCreate, len(items))
+		for i, item := range items {
+			// Set environment ID from context if not already set
+			if item.EnvironmentID == "" {
+				item.EnvironmentID = types.GetEnvironmentID(ctx)
+			}
+
+			bulk[i] = client.SubscriptionLineItem.Create().
+				SetID(item.ID).
+				SetSubscriptionID(item.SubscriptionID).
+				SetCustomerID(item.CustomerID).
+				SetNillableEntityID(types.ToNillableString(item.EntityID)).
+				SetNillableEntityType(func() *types.InvoiceLineItemEntityType {
+					if item.EntityType == "" {
+						return nil
+					}
+					t := types.InvoiceLineItemEntityType(item.EntityType)
+					return &t
+				}()).
+				SetNillablePlanDisplayName(types.ToNillableString(item.PlanDisplayName)).
+				SetPriceID(item.PriceID).
+				SetNillablePriceType(func() *types.PriceType {
+					if item.PriceType == "" {
+						return nil
+					}
+					t := item.PriceType
+					return &t
+				}()).
+				SetNillableMeterID(types.ToNillableString(item.MeterID)).
+				SetNillableMeterDisplayName(types.ToNillableString(item.MeterDisplayName)).
+				SetNillablePriceUnitID(item.PriceUnitID).
+				SetNillablePriceUnit(item.PriceUnit).
+				SetNillableDisplayName(types.ToNillableString(item.DisplayName)).
+				SetQuantity(item.Quantity).
+				SetCurrency(item.Currency).
+				SetBillingPeriod(item.BillingPeriod).
+				SetNillableStartDate(types.ToNillableTime(item.StartDate)).
+				SetNillableEndDate(types.ToNillableTime(item.EndDate)).
+				SetNillableSubscriptionPhaseID(item.SubscriptionPhaseID).
+				SetInvoiceCadence(item.InvoiceCadence).
+				SetNillableCommitmentAmount(item.CommitmentAmount).
+				SetNillableCommitmentQuantity(item.CommitmentQuantity).
+				SetNillableCommitmentType(types.ToNillableString(string(item.CommitmentType))).
+				SetNillableCommitmentOverageFactor(item.CommitmentOverageFactor).
+				SetCommitmentTrueUpEnabled(item.CommitmentTrueUpEnabled).
+				SetCommitmentWindowed(item.CommitmentWindowed).
+				SetNillableCommitmentDuration(item.CommitmentDuration).
+				SetCommitmentTimeBuckets(item.CommitmentTimeBuckets).
+				SetMetadata(item.Metadata).
+				SetTenantID(item.TenantID).
+				SetEnvironmentID(item.EnvironmentID).
+				SetStatus(string(item.Status)).
+				SetCreatedBy(item.CreatedBy).
+				SetUpdatedBy(item.UpdatedBy).
+				SetCreatedAt(time.Now()).
+				SetUpdatedAt(time.Now())
+		}
+
+		// Insert in batches to stay within PostgreSQL's 65535 parameter limit.
+		for i := 0; i < len(bulk); i += subscriptionLineItemBatchSize {
+			end := i + subscriptionLineItemBatchSize
+			if end > len(bulk) {
+				end = len(bulk)
+			}
+			if err := client.SubscriptionLineItem.CreateBulk(bulk[i:end]...).Exec(ctx); err != nil {
+				return fmt.Errorf("failed to create subscription line items: %w", err)
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		SetSpanError(span, err)
+		return err
+	}
+
+	SetSpanSuccess(span)
+	return nil
+}
+
+func (r *subscriptionRepository) GetWithLineItems(ctx context.Context, id string) (*domainSub.Subscription, []*domainSub.SubscriptionLineItem, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "get_with_line_items", map[string]interface{}{
+		"subscription_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	sub, err := client.Subscription.Query().
+		Where(
+			subscription.ID(id),
+			subscription.EnvironmentID(types.GetEnvironmentID(ctx)),
+			subscription.TenantID(types.GetTenantID(ctx)),
+			subscription.Status(string(types.StatusPublished)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, nil, ierr.NewError("subscription not found").
+				WithHint("Subscription not found").
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, nil, ierr.WithError(err).
+			WithHint("Failed to get subscription").
+			Mark(ierr.ErrDatabase)
+	}
+
+	s := domainSub.GetSubscriptionFromEnt(sub)
+
+	// Use ListBySubscription as the source of truth for line items
+	lineItemRepo := NewSubscriptionLineItemRepository(r.client, r.logger)
+	lineItems, err := lineItemRepo.ListBySubscription(ctx, s)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, nil, ierr.WithError(err).
+			WithHint("Failed to get subscription line items").
+			Mark(ierr.ErrDatabase)
+	}
+
+	s.LineItems = lineItems
+	SetSpanSuccess(span)
+	return s, s.LineItems, nil
+}
+
+// CreatePause creates a new subscription pause
+func (r *subscriptionRepository) CreatePause(ctx context.Context, pause *domainSub.SubscriptionPause) error {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "create_pause", map[string]interface{}{
+		"pause_id":        pause.ID,
+		"subscription_id": pause.SubscriptionID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+
+	// Set environment ID from context if not already set
+	if pause.EnvironmentID == "" {
+		pause.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	p, err := client.SubscriptionPause.Create().
+		SetID(pause.ID).
+		SetTenantID(pause.TenantID).
+		SetSubscriptionID(pause.SubscriptionID).
+		SetPauseStatus(string(pause.PauseStatus)).
+		SetPauseMode(string(pause.PauseMode)).
+		SetResumeMode(string(pause.ResumeMode)).
+		SetPauseStart(pause.PauseStart).
+		SetNillablePauseEnd(pause.PauseEnd).
+		SetNillableResumedAt(pause.ResumedAt).
+		SetOriginalPeriodStart(pause.OriginalPeriodStart).
+		SetOriginalPeriodEnd(pause.OriginalPeriodEnd).
+		SetReason(pause.Reason).
+		SetMetadata(pause.Metadata).
+		SetStatus(string(pause.Status)).
+		SetCreatedBy(pause.CreatedBy).
+		SetUpdatedBy(pause.UpdatedBy).
+		SetEnvironmentID(pause.EnvironmentID).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to create subscription pause").
+			Mark(ierr.ErrDatabase)
+	}
+
+	// Update the input pause with created data
+	SetSpanSuccess(span)
+	*pause = *domainSub.SubscriptionPauseFromEnt(p)
+	return nil
+}
+
+// GetPause gets a subscription pause by ID
+func (r *subscriptionRepository) GetPause(ctx context.Context, id string) (*domainSub.SubscriptionPause, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "get_pause", map[string]interface{}{
+		"pause_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	p, err := client.SubscriptionPause.Query().
+		Where(
+			subscriptionpause.ID(id),
+			subscriptionpause.TenantID(types.GetTenantID(ctx)),
+			subscriptionpause.Status(string(types.StatusPublished)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHintf("Subscription pause %s not found", id).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get subscription pause").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return domainSub.SubscriptionPauseFromEnt(p), nil
+}
+
+// UpdatePause updates a subscription pause
+func (r *subscriptionRepository) UpdatePause(ctx context.Context, pause *domainSub.SubscriptionPause) error {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "update_pause", map[string]interface{}{
+		"pause_id":        pause.ID,
+		"subscription_id": pause.SubscriptionID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+	now := time.Now().UTC()
+
+	p, err := client.SubscriptionPause.Query().
+		Where(
+			subscriptionpause.ID(pause.ID),
+			subscriptionpause.TenantID(types.GetTenantID(ctx)),
+			subscriptionpause.Status(string(types.StatusPublished)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHintf("Subscription pause %s not found", pause.ID).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to get subscription pause for update").
+			Mark(ierr.ErrDatabase)
+	}
+
+	_, err = p.Update().
+		SetPauseStatus(string(pause.PauseStatus)).
+		SetResumeMode(string(pause.ResumeMode)).
+		SetNillablePauseEnd(pause.PauseEnd).
+		SetNillableResumedAt(pause.ResumedAt).
+		SetReason(pause.Reason).
+		SetMetadata(pause.Metadata).
+		SetUpdatedBy(pause.UpdatedBy).
+		SetUpdatedAt(now).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to update subscription pause").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return nil
+}
+
+// ListPauses lists all pauses for a subscription
+func (r *subscriptionRepository) ListPauses(ctx context.Context, subscriptionID string) ([]*domainSub.SubscriptionPause, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "list_pauses", map[string]interface{}{
+		"subscription_id": subscriptionID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	pauses, err := client.SubscriptionPause.Query().
+		Where(
+			subscriptionpause.SubscriptionID(subscriptionID),
+			subscriptionpause.TenantID(types.GetTenantID(ctx)),
+			subscriptionpause.EnvironmentID(types.GetEnvironmentID(ctx)),
+			subscriptionpause.Status(string(types.StatusPublished)),
+		).
+		Order(ent.Desc(subscriptionpause.FieldCreatedAt)).
+		All(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list subscription pauses").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return domainSub.SubscriptionPauseListFromEnt(pauses), nil
+}
+
+// GetWithPauses gets a subscription with its pauses
+func (r *subscriptionRepository) GetWithPauses(ctx context.Context, id string) (*domainSub.Subscription, []*domainSub.SubscriptionPause, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "subscription", "get_with_pauses", map[string]interface{}{
+		"subscription_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	sub, err := client.Subscription.Query().
+		Where(
+			subscription.ID(id),
+			subscription.TenantID(types.GetTenantID(ctx)),
+			subscription.EnvironmentID(types.GetEnvironmentID(ctx)),
+			subscription.Status(string(types.StatusPublished)),
+		).
+		WithPauses(func(q *ent.SubscriptionPauseQuery) {
+			q.Where(subscriptionpause.Status(string(types.StatusPublished)))
+			q.Order(ent.Desc(subscriptionpause.FieldCreatedAt))
+		}).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, nil, ierr.WithError(err).
+				WithHintf("Subscription %s not found", id).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, nil, ierr.WithError(err).
+			WithHint("Failed to get subscription with pauses").
+			Mark(ierr.ErrDatabase)
+	}
+
+	subscription := domainSub.GetSubscriptionFromEnt(sub)
+	var pauses []*domainSub.SubscriptionPause
+	if sub.Edges.Pauses != nil {
+		pauses = domainSub.SubscriptionPauseListFromEnt(sub.Edges.Pauses)
+	}
+
+	SetSpanSuccess(span)
+	return subscription, pauses, nil
+}
+
+func (r *subscriptionRepository) SetCache(ctx context.Context, sub *domainSub.Subscription) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "subscription", "set", map[string]interface{}{
+		"subscription_id": sub.ID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixSubscription, sub.ID)
+	r.redisCache.Set(ctx, cacheKey, sub, cache.ExpiryDefaultRedis)
+}
+
+func (r *subscriptionRepository) GetCache(ctx context.Context, id string) *domainSub.Subscription {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "subscription", "get", map[string]interface{}{
+		"subscription_id": id,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixSubscription, id)
+	value, found := r.redisCache.Get(ctx, cacheKey)
+	if !found {
+		return nil
+	}
+	s, ok := cache.UnmarshalCacheValue[domainSub.Subscription](value)
+	if !ok {
+		return nil
+	}
+	return s
+}
+
+func (r *subscriptionRepository) DeleteCache(ctx context.Context, subID string) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "subscription", "delete", map[string]interface{}{
+		"subscription_id": subID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixSubscription, subID)
+	r.redisCache.Delete(ctx, cacheKey)
+}
+
+// ListByCustomerID retrieves all active subscriptions for a customer and includes line items
+func (r *subscriptionRepository) ListByCustomerID(ctx context.Context, customerID string) ([]*domainSub.Subscription, error) {
+	r.logger.Debug(ctx, "listing subscriptions by customer ID",
+		"customer_id", customerID)
+
+	// Create a filter with customer ID
+	filter := &types.SubscriptionFilter{
+		QueryFilter: types.NewNoLimitQueryFilter(),
+		CustomerID:  customerID,
+		SubscriptionStatus: []types.SubscriptionStatus{
+			types.SubscriptionStatusActive,
+			types.SubscriptionStatusTrialing,
+		},
+		WithLineItems:          true,
+		WithCouponAssociations: true,
+	}
+
+	// Use the existing List method
+	return r.List(ctx, filter)
+}
+
+// GetRecentSubscriptionsByPlan returns subscription counts grouped by plan for last 7 days
+func (r *subscriptionRepository) GetRecentSubscriptionsByPlan(ctx context.Context) ([]types.SubscriptionPlanCount, error) {
+	tenantID := types.GetTenantID(ctx)
+	envID := types.GetEnvironmentID(ctx)
+
+	span := StartRepositorySpan(ctx, "subscription", "get_recent_subscriptions_by_plan", map[string]interface{}{
+		"tenant_id":      tenantID,
+		"environment_id": envID,
+	})
+	defer FinishSpan(span)
+
+	query := `
+		SELECT
+			p.id AS plan_id,
+			p.name AS plan_name,
+			COUNT(s.id) AS recent_subscription_count
+		FROM subscriptions s
+		JOIN plans p ON p.id = s.plan_id
+		WHERE s.tenant_id = $1
+			AND s.environment_id = $2
+			AND s.created_at >= NOW() - INTERVAL '7 days'
+			AND s.subscription_status = 'active'
+			AND s.status = 'published'
+		GROUP BY p.id, p.name
+		ORDER BY recent_subscription_count DESC`
+
+	rows, err := r.client.Reader(ctx).QueryContext(ctx, query, tenantID, envID)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).WithHint("failed to get recent subscriptions by plan").Mark(ierr.ErrDatabase)
+	}
+	defer rows.Close()
+
+	var results []types.SubscriptionPlanCount
+	for rows.Next() {
+		var result types.SubscriptionPlanCount
+		if err := rows.Scan(&result.PlanID, &result.PlanName, &result.Count); err != nil {
+			SetSpanError(span, err)
+			return nil, ierr.WithError(err).WithHint("failed to scan recent subscriptions row").Mark(ierr.ErrDatabase)
+		}
+		results = append(results, result)
+	}
+
+	if err := rows.Err(); err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).WithHint("failed to iterate recent subscriptions rows").Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return results, nil
+}
+
+// GetSubscriptionsWithAutoInvoiceThreshold returns active, published subscriptions (paginated)
+// where auto_invoice_threshold is set directly on the subscription.
+// this runs without the tenant and environment filters applied,only use this for auto invoice threshold billing.
+func (r *subscriptionRepository) GetSubscriptionsWithAutoInvoiceThreshold(ctx context.Context, limit, offset int) ([]*domainSub.Subscription, error) {
+
+	subs, err := r.client.Reader(ctx).Subscription.Query().
+		Where(
+			subscription.Status(string(types.StatusPublished)),
+			subscription.SubscriptionStatusEQ(types.SubscriptionStatusActive),
+			subscription.AutoInvoiceThresholdNotNil(),
+			subscription.AutoInvoiceThresholdGT(decimal.Zero),
+		).
+		Order(ent.Asc(subscription.FieldID)).
+		Limit(limit).
+		Offset(offset).
+		All(ctx)
+	if err != nil {
+		return nil, ierr.WithError(err).
+			WithHint("Failed to fetch threshold subscriptions").
+			Mark(ierr.ErrDatabase)
+	}
+
+	if len(subs) == 0 {
+		return []*domainSub.Subscription{}, nil
+	}
+
+	result := make([]*domainSub.Subscription, len(subs))
+	for i, sub := range subs {
+		result[i] = domainSub.GetSubscriptionFromEnt(sub)
+	}
+
+	return result, nil
+}
+
+// ListEnvironmentsWithGatedActiveSubscriptions reads only idx_subscriptions_gated_active, so it stays cheap
+// however many subscriptions are not payment-gated.
+func (r *subscriptionRepository) ListEnvironmentsWithGatedActiveSubscriptions(ctx context.Context) ([]types.TenantEnvironment, error) {
+	span := StartRepositorySpan(ctx, "subscription", "list_environments_with_gated_active", nil)
+	defer FinishSpan(span)
+
+	var envs []types.TenantEnvironment
+	err := r.client.Reader(ctx).Subscription.Query().
+		Where(
+			subscription.Status(string(types.StatusPublished)),
+			subscription.SubscriptionStatusEQ(types.SubscriptionStatusActive),
+			subscription.PaymentBehaviorIn(types.IncompletePaymentBehaviors()...),
+		).
+		GroupBy(subscription.FieldTenantID, subscription.FieldEnvironmentID).
+		Scan(ctx, &envs)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list environments with payment-gated subscriptions").
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return envs, nil
+}
+
+// markOverdueGatedIncompleteQuery is one UPDATE ... RETURNING, so the returned IDs are exactly the rows
+// changed. The subscription filter matches idx_subscriptions_gated_active; EXISTS re-checks the invoice at
+// write time, so an invoice paid mid-sweep never flips its subscription. $5 is due date minus grace.
+const markOverdueGatedIncompleteQuery = `
+	UPDATE subscriptions s
+	SET subscription_status = 'incomplete', updated_at = $3, updated_by = $4
+	WHERE s.tenant_id = $1
+		AND s.environment_id = $2
+		AND s.status = 'published'
+		AND s.subscription_status = 'active'
+		AND s.payment_behavior IN ('allow_incomplete', 'default_incomplete', 'error_if_incomplete')
+		AND EXISTS (
+			SELECT 1 FROM invoices i
+			WHERE i.tenant_id = s.tenant_id
+				AND i.environment_id = s.environment_id
+				AND i.subscription_id = s.id
+				AND i.status = 'published'
+				AND i.invoice_type = 'SUBSCRIPTION'
+				AND i.invoice_status = 'FINALIZED'
+				AND i.billing_reason = 'SUBSCRIPTION_CYCLE'
+				AND i.payment_status IN ('PENDING', 'FAILED')
+				AND i.amount_remaining > 0
+				AND i.due_date <= $3
+				AND i.due_date > $5)
+	RETURNING s.id`
+
+func (r *subscriptionRepository) MarkOverdueGatedSubscriptionsIncomplete(ctx context.Context, asOf time.Time, graceDays int) ([]string, error) {
+	span := StartRepositorySpan(ctx, "subscription", "mark_overdue_gated_incomplete", map[string]interface{}{
+		"grace_days": graceDays,
+	})
+	defer FinishSpan(span)
+
+	asOf = asOf.UTC()
+	rows, err := r.client.Writer(ctx).QueryContext(ctx, markOverdueGatedIncompleteQuery,
+		types.GetTenantID(ctx),
+		types.GetEnvironmentID(ctx),
+		asOf,
+		types.GetUserID(ctx),
+		asOf.AddDate(0, 0, -graceDays),
+	)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to mark overdue subscriptions incomplete").
+			Mark(ierr.ErrDatabase)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			SetSpanError(span, err)
+			return nil, ierr.WithError(err).
+				WithHint("Failed to read subscription marked incomplete").
+				Mark(ierr.ErrDatabase)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to read subscriptions marked incomplete").
+			Mark(ierr.ErrDatabase)
+	}
+
+	for _, id := range ids {
+		r.DeleteCache(ctx, id)
+	}
+
+	SetSpanSuccess(span)
+	return ids, nil
+}

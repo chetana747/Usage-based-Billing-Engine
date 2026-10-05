@@ -1,0 +1,1774 @@
+package dto
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/domain/invoice"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/flexprice/flexprice/internal/validator"
+	"github.com/samber/lo"
+	"github.com/shopspring/decimal"
+)
+
+// InvoiceCoupon represents a coupon to be applied at the invoice level.
+// Only coupon ID is needed - the service will fetch and validate the coupon.
+type InvoiceCoupon struct {
+	CouponID            string  `json:"coupon_id" validate:"required"`
+	CouponAssociationID *string `json:"coupon_association_id,omitempty"`
+}
+
+// InvoiceLineItemCoupon represents a coupon applied to a specific invoice line item.
+// Only coupon ID is needed - the service will fetch and validate the coupon.
+type InvoiceLineItemCoupon struct {
+	LineItemID             string  `json:"line_item_id" validate:"required"` // price_id used to match the line item
+	SubscriptionLineItemID *string `json:"subscription_line_item_id,omitempty"`
+	CouponID               string  `json:"coupon_id" validate:"required"`
+	CouponAssociationID    *string `json:"coupon_association_id,omitempty"`
+}
+
+// InvoiceStateChangeSourceType names the kind of caller behind a guarded state change.
+type InvoiceStateChangeSourceType string
+
+const (
+	InvoiceStateChangeSourceCheckoutSession InvoiceStateChangeSourceType = "checkout_session"
+)
+
+// InvoiceStateChangeSource identifies the caller of a guarded state change, so the session
+// owning an invoice can act on it. Unexported and json:"-" — server-set only.
+type InvoiceStateChangeSource struct {
+	sourceType InvoiceStateChangeSourceType
+	sourceID   string
+}
+
+func NewCheckoutSessionSource(sessionID string) InvoiceStateChangeSource {
+	return InvoiceStateChangeSource{
+		sourceType: InvoiceStateChangeSourceCheckoutSession,
+		sourceID:   sessionID,
+	}
+}
+
+func (i *InvoiceStateChangeSource) SourceID() string {
+	if i == nil {
+		return ""
+	}
+
+	return i.sourceID
+}
+
+// FinalizeInvoiceRequest carries caller identity for the finalization guard.
+type FinalizeInvoiceRequest struct {
+	InvoiceStateChangeSource
+}
+
+func (r *FinalizeInvoiceRequest) SourceID() string {
+	if r == nil {
+		return ""
+	}
+
+	return r.InvoiceStateChangeSource.SourceID()
+}
+
+// CreateInvoiceRequest represents the request payload for creating a new invoice
+type CreateInvoiceRequest struct {
+	// invoice_number is an optional human-readable identifier for the invoice
+	InvoiceNumber *string `json:"invoice_number,omitempty"`
+
+	// customer_id is the unique identifier of the customer this invoice belongs to
+	CustomerID string `json:"customer_id" validate:"required"`
+
+	// subscription_id is the optional unique identifier of the subscription associated with this invoice
+	SubscriptionID *string `json:"subscription_id,omitempty"`
+
+	// idempotency_key is an optional key used to prevent duplicate invoice creation
+	IdempotencyKey *string `json:"idempotency_key"`
+
+	// invoice_type indicates the type of invoice (subscription, one_time, etc.)
+	InvoiceType types.InvoiceType `json:"invoice_type"`
+
+	// currency is the three-letter ISO currency code (e.g., USD, EUR) for the invoice
+	Currency string `json:"currency" validate:"required"`
+
+	// amount_due is the total amount that needs to be paid for this invoice
+	AmountDue decimal.Decimal `json:"amount_due" validate:"required" swaggertype:"string"`
+
+	// total is the total amount of the invoice including taxes and discounts
+	Total decimal.Decimal `json:"total" validate:"required" swaggertype:"string"`
+
+	// subtotal is the amount before taxes and discounts are applied
+	Subtotal decimal.Decimal `json:"subtotal" validate:"required" swaggertype:"string"`
+
+	// description is an optional text description of the invoice
+	Description string `json:"description,omitempty"`
+
+	// due_date is the date by which payment is expected
+	DueDate *time.Time `json:"due_date,omitempty"`
+
+	// billing_period is the period this invoice covers (e.g., "monthly", "yearly")
+	BillingPeriod *string `json:"billing_period,omitempty"`
+
+	// period_start is the start date of the billing period
+	PeriodStart *time.Time `json:"period_start,omitempty"`
+
+	// period_end is the end date of the billing period
+	PeriodEnd *time.Time `json:"period_end,omitempty"`
+
+	// billing_reason indicates why this invoice was created (subscription_cycle, manual, etc.)
+	BillingReason types.InvoiceBillingReason `json:"billing_reason"`
+
+	// invoice_status represents the current status of the invoice (draft, finalized, etc.)
+	InvoiceStatus *types.InvoiceStatus `json:"invoice_status,omitempty"`
+
+	// payment_status represents the payment status of the invoice (unpaid, paid, etc.)
+	PaymentStatus *types.PaymentStatus `json:"payment_status,omitempty"`
+
+	// amount_paid is the amount that has been paid towards this invoice
+	AmountPaid *decimal.Decimal `json:"amount_paid,omitempty" swaggertype:"string"`
+
+	// total_prepaid_applied is the total amount of prepaid applied to this invoice.
+	TotalPrepaidApplied *decimal.Decimal `json:"total_prepaid_applied,omitempty" swaggertype:"string"`
+
+	// line_items contains the individual items that make up this invoice
+	LineItems []CreateInvoiceLineItemRequest `json:"line_items,omitempty"`
+
+	// coupons
+	Coupons []string `json:"coupons,omitempty"`
+
+	// tax_rates
+	TaxRates []string `json:"tax_rates,omitempty"`
+
+	// Invoice Coupons
+	InvoiceCoupons []InvoiceCoupon `json:"invoice_coupons,omitempty"`
+
+	// Invoice Line Item Coupons
+	LineItemCoupons []InvoiceLineItemCoupon `json:"line_item_coupons,omitempty"`
+
+	// metadata contains additional custom key-value pairs for storing extra information
+	Metadata types.Metadata `json:"metadata,omitempty"`
+
+	// tax_rate_overrides is the tax rate overrides to be applied to the invoice
+	TaxRateOverrides []*TaxRateOverride `json:"tax_rate_overrides,omitempty"`
+
+	// PreparedTaxRates carries tax rates already resolved by the caller (e.g. CreateOneOffInvoice
+	// after calling PrepareTaxRatesForInvoice) through to whatever builds the invoice next.
+	// json:"-" — this request is bound directly from client JSON (POST /invoices), and a
+	// resolved rate set must never be settable over the wire; it is only ever set server-side.
+	PreparedTaxRates *InvoiceTaxRates `json:"-"`
+
+	// invoice_pdf_url is the URL where customers can download the PDF version of this invoice
+	InvoicePDFURL *string `json:"invoice_pdf_url,omitempty"`
+
+	// issue_date overrides the user-facing date of the invoice.
+	// Defaults to created_at if not provided.
+	IssueDate *time.Time `json:"issue_date,omitempty"`
+
+	// force_sync_invoice, when true, attempts to synchronously sync this invoice to
+	// Moyasar (if enabled) before returning, instead of relying solely on the async
+	// Kafka + Temporal vendor-sync pipeline. Only honored by CreateOneOffInvoice.
+	// Best-effort: sync failures do not fail invoice creation.
+	ForceSyncInvoice bool `json:"force_sync_invoice,omitempty"`
+
+	// checkout gates this invoice behind a hosted payment session: created DRAFT, finalized
+	// only when the payment webhook lands. One-off invoices only.
+	Checkout *CheckoutParams `json:"checkout,omitempty"`
+
+	// SourceType is server-set only; a caller must not be able to claim provenance.
+	SourceType types.InvoiceSourceType `json:"-"`
+}
+
+// ToDraftRequest converts a CreateInvoiceRequest to a CreateDraftInvoiceRequest,
+// extracting only the fields needed for empty draft creation.
+func (r *CreateInvoiceRequest) ToDraftRequest() CreateDraftInvoiceRequest {
+	return CreateDraftInvoiceRequest{
+		CustomerID:     r.CustomerID,
+		SubscriptionID: r.SubscriptionID,
+		InvoiceType:    r.InvoiceType,
+		Currency:       r.Currency,
+		PeriodStart:    r.PeriodStart,
+		PeriodEnd:      r.PeriodEnd,
+		BillingPeriod:  r.BillingPeriod,
+		BillingReason:  r.BillingReason,
+		Description:    r.Description,
+		DueDate:        r.DueDate,
+		Metadata:       r.Metadata,
+		IdempotencyKey: r.IdempotencyKey,
+		InvoicePDFURL:  r.InvoicePDFURL,
+		IssueDate:      r.IssueDate,
+		SourceType:     r.SourceType,
+	}
+}
+
+// ToComputeRequest converts a CreateInvoiceRequest to an InvoiceComputeRequest,
+// extracting only the fields needed for invoice computation (line items, amounts, coupons, taxes).
+func (r *CreateInvoiceRequest) ToComputeRequest() InvoiceComputeRequest {
+	return InvoiceComputeRequest{
+		LineItems:        r.LineItems,
+		Subtotal:         r.Subtotal,
+		Total:            r.Total,
+		AmountDue:        r.AmountDue,
+		Description:      r.Description,
+		DueDate:          r.DueDate,
+		InvoiceCoupons:   r.InvoiceCoupons,
+		LineItemCoupons:  r.LineItemCoupons,
+		PreparedTaxRates: r.PreparedTaxRates,
+	}
+}
+
+// ZeroOutAmounts forces all monetary amounts on this invoice request to zero while
+// preserving line item structure (descriptions, quantities, price metadata).
+//
+// Used for trial start invoices: the customer sees exactly which charges apply when
+// the trial ends, but amounts are always $0 during the trial window. Quantity and
+// pricing metadata are kept so the pricing skeleton remains visible (e.g. "1 seat × $99/mo").
+func (r *CreateInvoiceRequest) ZeroOutAmounts() {
+	r.Subtotal = decimal.Zero
+	r.Total = decimal.Zero
+	r.AmountDue = decimal.Zero
+	for i := range r.LineItems {
+		r.LineItems[i].Amount = decimal.Zero
+	}
+}
+
+// ===================== Draft Invoice Creation DTO =====================
+
+// CreateDraftInvoiceRequest contains only the fields needed to create an empty zero-dollar
+// draft invoice. No amounts, no line items, no coupons, no taxes — those are populated
+// later by ComputeInvoice. Used by CreateEmptyDraftInvoice and CreateDraftInvoiceForSubscription.
+type CreateDraftInvoiceRequest struct {
+	CustomerID     string  `json:"customer_id" validate:"required"`
+	SubscriptionID *string `json:"subscription_id,omitempty"`
+	// SubscriptionCustomerID is the subscription owner's customer ID; set by service only (not in JSON).
+	SubscriptionCustomerID *string                    `json:"-"`
+	InvoiceType            types.InvoiceType          `json:"invoice_type" validate:"required"`
+	Currency               string                     `json:"currency" validate:"required"`
+	PeriodStart            *time.Time                 `json:"period_start,omitempty"`
+	PeriodEnd              *time.Time                 `json:"period_end,omitempty"`
+	BillingPeriod          *string                    `json:"billing_period,omitempty"`
+	BillingReason          types.InvoiceBillingReason `json:"billing_reason,omitempty"`
+	Description            string                     `json:"description,omitempty"`
+	DueDate                *time.Time                 `json:"due_date,omitempty"`
+	Metadata               types.Metadata             `json:"metadata,omitempty"`
+	IdempotencyKey         *string                    `json:"idempotency_key,omitempty"`
+	InvoicePDFURL          *string                    `json:"invoice_pdf_url,omitempty"`
+	IssueDate              *time.Time                 `json:"issue_date,omitempty"`
+	// SourceType is server-set only; a caller must not be able to claim provenance.
+	SourceType types.InvoiceSourceType `json:"-"`
+}
+
+// CreateSubscriptionDraftInvoiceRequest is the input for CreateDraftInvoiceForSubscription.
+type CreateSubscriptionDraftInvoiceRequest struct {
+	SubscriptionID string
+	PeriodStart    time.Time
+	PeriodEnd      time.Time
+	ReferencePoint types.InvoiceReferencePoint
+	// SourceType stamps provenance on the draft; empty for ordinary billing.
+	SourceType types.InvoiceSourceType
+}
+
+// Validate validates the draft invoice creation request.
+func (r *CreateDraftInvoiceRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+	if err := r.InvoiceType.Validate(); err != nil {
+		return err
+	}
+	if r.InvoiceType == types.InvoiceTypeSubscription {
+		if r.SubscriptionID == nil {
+			return ierr.NewError("subscription_id is required for subscription invoice").
+				WithHint("subscription_id is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+		if r.BillingPeriod == nil {
+			return ierr.NewError("billing_period is required for subscription invoice").
+				WithHint("billing_period is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+		if r.PeriodStart == nil {
+			return ierr.NewError("period_start is required for subscription invoice").
+				WithHint("period_start is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+		if r.PeriodEnd == nil {
+			return ierr.NewError("period_end is required for subscription invoice").
+				WithHint("period_end is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+		if r.PeriodEnd.Before(*r.PeriodStart) {
+			return ierr.NewError("period_end must be after period_start").
+				WithHint("period_end must be after period_start").
+				Mark(ierr.ErrValidation)
+		}
+	}
+	return nil
+}
+
+// ToDraftInvoice converts a CreateDraftInvoiceRequest to a zero-dollar draft invoice domain object.
+// Unlike CreateInvoiceRequest.ToInvoice, this skips tax/discount calculations since all amounts are zero.
+func (r *CreateDraftInvoiceRequest) ToDraftInvoice(ctx context.Context) (*invoice.Invoice, error) {
+	if err := types.ValidateCurrencyCode(r.Currency); err != nil {
+		return nil, err
+	}
+
+	baseModel := types.GetDefaultBaseModel(ctx)
+
+	issueDate := r.IssueDate
+	if issueDate == nil {
+		issueDate = &baseModel.CreatedAt
+	}
+
+	return &invoice.Invoice{
+		ID:                     types.GenerateUUIDWithPrefix(types.UUID_PREFIX_INVOICE),
+		CustomerID:             r.CustomerID,
+		SubscriptionID:         r.SubscriptionID,
+		SubscriptionCustomerID: r.SubscriptionCustomerID,
+		InvoiceType:            r.InvoiceType,
+		Currency:               strings.ToLower(r.Currency),
+		AmountDue:              decimal.Zero,
+		Total:                  decimal.Zero,
+		Subtotal:               decimal.Zero,
+		AmountPaid:             decimal.Zero,
+		AmountRemaining:        decimal.Zero,
+		TotalDiscount:          decimal.Zero,
+		TotalTax:               decimal.Zero,
+		Description:            r.Description,
+		DueDate:                r.DueDate,
+		PeriodStart:            r.PeriodStart,
+		BillingPeriod:          r.BillingPeriod,
+		PeriodEnd:              r.PeriodEnd,
+		BillingReason:          string(r.BillingReason),
+		SourceType:             r.SourceType,
+		Metadata:               r.Metadata,
+		InvoicePDFURL:          r.InvoicePDFURL,
+		InvoiceStatus:          types.InvoiceStatusDraft,
+		PaymentStatus:          types.PaymentStatusPending,
+		IssueDate:              issueDate,
+		BaseModel:              baseModel,
+	}, nil
+}
+
+// ===================== Invoice Compute DTO =====================
+
+// InvoiceComputeRequest contains the computed data to apply to a draft invoice during ComputeInvoice.
+// No customer, subscription, or period info — those are already on the invoice. This is purely
+// the computed line items, amounts, coupons, and taxes to populate.
+type InvoiceComputeRequest struct {
+	LineItems       []CreateInvoiceLineItemRequest `json:"line_items"`
+	Subtotal        decimal.Decimal                `json:"subtotal" swaggertype:"string"`
+	Total           decimal.Decimal                `json:"total" swaggertype:"string"`
+	AmountDue       decimal.Decimal                `json:"amount_due" swaggertype:"string"`
+	Description     string                         `json:"description,omitempty"`
+	DueDate         *time.Time                     `json:"due_date,omitempty"`
+	InvoiceCoupons  []InvoiceCoupon                `json:"invoice_coupons,omitempty"`
+	LineItemCoupons []InvoiceLineItemCoupon        `json:"line_item_coupons,omitempty"`
+	// PreparedTaxRates is set server-side only — see CreateInvoiceRequest.PreparedTaxRates.
+	// json:"-" — this request is also bound directly from client JSON (POST /invoices/{id}/compute).
+	PreparedTaxRates *InvoiceTaxRates `json:"-"`
+
+	InvoiceStateChangeSource
+
+	// OpeningInvoiceAdjustmentAmount is internal: transport field only — read by ComputeInvoice and
+	// forwarded to PrepareSubscriptionInvoiceRequestParams.OpeningInvoiceAdjustmentAmount, which applies it
+	// in CalculateFixedCharges (reducing fixed line item amounts directly). Not applied inside ComputeInvoice itself.
+	OpeningInvoiceAdjustmentAmount *decimal.Decimal `json:"-"`
+}
+
+func (r *InvoiceComputeRequest) SourceID() string {
+	if r == nil {
+		return ""
+	}
+
+	return r.InvoiceStateChangeSource.SourceID()
+}
+
+// ComputeInvoiceResponse is the API response after recomputing a draft invoice with ComputeInvoice.
+type ComputeInvoiceResponse struct {
+	Invoice *InvoiceResponse `json:"invoice"`
+	Skipped bool             `json:"skipped"`
+}
+
+// CreateProrationInvoiceRequest represents the request for creating a proration invoice
+type CreateProrationInvoiceRequest struct {
+	// subscription_id is the unique identifier of the subscription this proration relates to
+	SubscriptionID string `json:"subscription_id" validate:"required"`
+
+	// customer_id is the unique identifier of the customer
+	CustomerID string `json:"customer_id" validate:"required"`
+
+	// proration_result contains the calculated proration details
+	ProrationResult *ProrationResult `json:"proration_result" validate:"required"`
+
+	// description is the human-readable description for the invoice
+	Description string `json:"description,omitempty"`
+
+	// effective_date is when the proration takes effect
+	EffectiveDate time.Time `json:"effective_date" validate:"required"`
+
+	// cancellation_type indicates the type of cancellation (for metadata)
+	CancellationType string `json:"cancellation_type,omitempty"`
+
+	// cancellation_reason is the business reason for the cancellation
+	CancellationReason string `json:"cancellation_reason,omitempty"`
+}
+
+// ProrationResult represents the result of proration calculations
+type ProrationResult struct {
+	// total_proration_amount is the net amount (credits - charges)
+	TotalProrationAmount decimal.Decimal `json:"total_proration_amount" swaggertype:"string"`
+
+	// line_item_results contains per-line-item proration details
+	LineItemResults map[string]*ProrationLineItemResult `json:"line_item_results"`
+
+	// currency is the currency code
+	Currency string `json:"currency"`
+}
+
+// ProrationLineItemResult represents proration results for a single line item
+type ProrationLineItemResult struct {
+	// credit_items are the credit line items
+	CreditItems []ProrationLineItem `json:"credit_items"`
+
+	// charge_items are the charge line items
+	ChargeItems []ProrationLineItem `json:"charge_items"`
+
+	// net_amount is the net amount for this line item
+	NetAmount decimal.Decimal `json:"net_amount" swaggertype:"string"`
+
+	// proration_date is when the proration takes effect
+	ProrationDate time.Time `json:"proration_date"`
+
+	// line_item_id is the subscription line item ID
+	LineItemID string `json:"line_item_id"`
+}
+
+// ProrationLineItem represents a single proration credit or charge
+type ProrationLineItem struct {
+	// description is the human-readable description
+	Description string `json:"description"`
+
+	// amount is the monetary amount (positive for charge, negative for credit)
+	Amount decimal.Decimal `json:"amount" swaggertype:"string"`
+
+	// start_date is the period start this item covers
+	StartDate time.Time `json:"start_date"`
+
+	// end_date is the period end this item covers
+	EndDate time.Time `json:"end_date"`
+
+	// quantity is the quantity
+	Quantity decimal.Decimal `json:"quantity" swaggertype:"string"`
+
+	// price_id is the associated price ID
+	PriceID string `json:"price_id"`
+
+	// is_credit indicates if this is a credit (true) or charge (false)
+	IsCredit bool `json:"is_credit"`
+}
+
+// ValidateForCheckout validates the payment-gated variant of POST /invoices. Called
+// explicitly from CreateOneOffInvoice — Validate() is not wired into that path.
+func (r *CreateInvoiceRequest) ValidateForCheckout() error {
+	if err := r.Checkout.Validate(); err != nil {
+		return err
+	}
+
+	if r.InvoiceType == "" {
+		r.InvoiceType = types.InvoiceTypeOneOff
+	}
+	if r.InvoiceType != types.InvoiceTypeOneOff {
+		return ierr.NewError("invoice_type must be ONE_OFF when checkout is provided").
+			WithHint("Payment-gated checkout is only supported for one-off invoices").
+			WithReportableDetails(map[string]any{"invoice_type": r.InvoiceType}).
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.InvoiceStatus != nil {
+		return ierr.NewError("invoice_status is not supported when checkout is provided").
+			WithHint("A gated invoice is created as DRAFT and finalized on payment").
+			Mark(ierr.ErrValidation)
+	}
+	if r.PaymentStatus != nil {
+		return ierr.NewError("payment_status is not supported when checkout is provided").
+			WithHint("Payment status is set by the checkout session on payment").
+			Mark(ierr.ErrValidation)
+	}
+	if r.AmountPaid != nil {
+		return ierr.NewError("amount_paid is not supported when checkout is provided").
+			WithHint("Amount paid is recorded by the checkout session on payment").
+			Mark(ierr.ErrValidation)
+	}
+	if r.TotalPrepaidApplied != nil {
+		return ierr.NewError("total_prepaid_applied is not supported when checkout is provided").
+			WithHint("Prepaid credits are applied while computing the gated draft").
+			Mark(ierr.ErrValidation)
+	}
+	if r.SubscriptionID != nil {
+		return ierr.NewError("subscription_id is not supported when checkout is provided").
+			WithHint("Payment-gated checkout is only supported for one-off invoices").
+			Mark(ierr.ErrValidation)
+	}
+	if r.ForceSyncInvoice {
+		return ierr.NewError("force_sync_invoice is not supported when checkout is provided").
+			WithHint("A gated invoice syncs to vendors after it is finalized on payment").
+			Mark(ierr.ErrValidation)
+	}
+
+	if len(r.LineItems) == 0 {
+		return ierr.NewError("line_items is required when checkout is provided").
+			WithHint("Provide at least one line item to charge for").
+			Mark(ierr.ErrValidation)
+	}
+	if !r.AmountDue.IsPositive() {
+		return ierr.NewError("amount_due must be greater than zero when checkout is provided").
+			WithHint("Checkout requires a non-zero invoice").
+			WithReportableDetails(map[string]any{"amount_due": r.AmountDue.String()}).
+			Mark(ierr.ErrValidation)
+	}
+
+	// A past due_date fires invoice.payment.overdue against a draft nobody could pay yet.
+	if r.DueDate != nil && r.DueDate.Before(time.Now().UTC()) {
+		return ierr.NewError("due_date must be in the future when checkout is provided").
+			WithHint("A gated invoice cannot be overdue before its payment link expires").
+			WithReportableDetails(map[string]any{"due_date": r.DueDate}).
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+func (r *CreateInvoiceRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+
+	if err := r.InvoiceType.Validate(); err != nil {
+		return err
+	}
+
+	// Allow negative amount_due for credit invoices, but not for other types
+	if r.AmountDue.IsNegative() && r.InvoiceType != types.InvoiceTypeCredit {
+		return ierr.NewError("amount_due must be non-negative for non-credit invoices").
+			WithHint("amount due is negative for non-credit invoice").
+			WithReportableDetails(map[string]any{
+				"amount_due":   r.AmountDue.String(),
+				"invoice_type": r.InvoiceType,
+			}).Mark(ierr.ErrValidation)
+	}
+
+	// Validate total_prepaid_applied if provided
+	if r.TotalPrepaidApplied != nil && r.TotalPrepaidApplied.IsNegative() {
+		return ierr.NewError("total_prepaid_applied must be non-negative").
+			WithHint("total_prepaid_applied cannot be negative").
+			WithReportableDetails(map[string]any{
+				"total_prepaid_applied": r.TotalPrepaidApplied.String(),
+			}).Mark(ierr.ErrValidation)
+	}
+
+	if r.InvoiceType == types.InvoiceTypeSubscription {
+		if r.SubscriptionID == nil {
+			return ierr.NewError("subscription_id is required for subscription invoice").
+				WithHint("subscription_id is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+
+		if r.BillingPeriod == nil {
+			return ierr.NewError("billing_period is required for subscription invoice").
+				WithHint("billing_period is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+
+		if r.PeriodStart == nil {
+			return ierr.NewError("period_start is required for subscription invoice").
+				WithHint("period_start is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+
+		if r.PeriodEnd == nil {
+			return ierr.NewError("period_end is required for subscription invoice").
+				WithHint("period_end is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+
+		if r.PeriodEnd.Before(*r.PeriodStart) {
+			return ierr.NewError("period_end must be after period_start").
+				WithHint("period_end must be after period_start").
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	// Validate line items if present
+	if len(r.LineItems) > 0 {
+		var totalAmount decimal.Decimal
+		for _, item := range r.LineItems {
+			if err := item.Validate(r.InvoiceType); err != nil {
+				return ierr.WithError(err).WithHint("invalid line item").Mark(ierr.ErrValidation)
+			}
+			totalAmount = totalAmount.Add(item.Amount)
+		}
+
+		// Round both values to currency precision before comparing to avoid floating-point accumulation errors
+		roundedTotal := types.RoundToCurrencyPrecision(totalAmount, r.Currency)
+		roundedAmountDue := types.RoundToCurrencyPrecision(r.AmountDue, r.Currency)
+		if !roundedTotal.Equal(roundedAmountDue) {
+			return ierr.NewError("sum of line item amounts must equal invoice amount_due").WithHintf("sum of line item amounts %s must equal invoice amount_due %s", roundedTotal.String(), roundedAmountDue.String()).Mark(ierr.ErrValidation)
+		}
+	}
+
+	// Validate invoice coupons if present
+	for _, coupon := range r.InvoiceCoupons {
+		if err := coupon.Validate(); err != nil {
+			return ierr.WithError(err).WithHint("invalid invoice coupon").Mark(ierr.ErrValidation)
+		}
+	}
+
+	// Validate line item coupons if present
+	for _, lineItemCoupon := range r.LineItemCoupons {
+		if err := lineItemCoupon.Validate(); err != nil {
+			return ierr.WithError(err).WithHint("invalid line item coupon").Mark(ierr.ErrValidation)
+		}
+	}
+
+	// taxrate overrides validation
+	if len(r.TaxRateOverrides) > 0 {
+		for _, taxRateOverride := range r.TaxRateOverrides {
+			if err := taxRateOverride.Validate(); err != nil {
+				return ierr.NewError("invalid tax rate override").
+					WithHint("Tax rate override validation failed").
+					WithReportableDetails(map[string]interface{}{
+						"error":             err.Error(),
+						"tax_rate_override": taxRateOverride,
+					}).
+					Mark(ierr.ErrValidation)
+			}
+		}
+	}
+
+	// url validation if url is provided
+	if r.InvoicePDFURL != nil {
+		if err := validator.ValidateURL(r.InvoicePDFURL); err != nil {
+			return ierr.WithError(err).
+				WithHint("invalid invoice_pdf_url").
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	return nil
+}
+
+// ToInvoice converts a create invoice request to an invoice
+func (r *CreateInvoiceRequest) ToInvoice(ctx context.Context) (*invoice.Invoice, error) {
+	// Validate currency
+	if err := types.ValidateCurrencyCode(r.Currency); err != nil {
+		return nil, err
+	}
+
+	inv := &invoice.Invoice{
+		ID:              types.GenerateUUIDWithPrefix(types.UUID_PREFIX_INVOICE),
+		CustomerID:      r.CustomerID,
+		SubscriptionID:  r.SubscriptionID,
+		InvoiceType:     r.InvoiceType,
+		Currency:        strings.ToLower(r.Currency),
+		AmountDue:       r.AmountDue,
+		Total:           r.Total,
+		Subtotal:        r.Subtotal,
+		Description:     r.Description,
+		DueDate:         r.DueDate,
+		PeriodStart:     r.PeriodStart,
+		BillingPeriod:   r.BillingPeriod,
+		PeriodEnd:       r.PeriodEnd,
+		BillingReason:   string(r.BillingReason),
+		Metadata:        r.Metadata,
+		InvoicePDFURL:   r.InvoicePDFURL,
+		BaseModel:       types.GetDefaultBaseModel(ctx),
+		AmountRemaining: decimal.Zero,
+	}
+
+	if inv.EnvironmentID == "" {
+		inv.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	// Default invoice status and payment status
+	if r.InvoiceStatus != nil {
+		inv.InvoiceStatus = *r.InvoiceStatus
+	}
+
+	if r.PaymentStatus != nil {
+		inv.PaymentStatus = *r.PaymentStatus
+	}
+
+	if r.AmountPaid != nil {
+		inv.AmountPaid = *r.AmountPaid
+	}
+
+	// Set total_prepaid_applied if provided, otherwise default to zero
+	inv.TotalPrepaidCreditsApplied = lo.FromPtrOr(r.TotalPrepaidApplied, decimal.Zero)
+
+	// Convert line items
+	if len(r.LineItems) > 0 {
+		inv.LineItems = make([]*invoice.InvoiceLineItem, len(r.LineItems))
+		for i, item := range r.LineItems {
+			inv.LineItems[i] = item.ToInvoiceLineItem(ctx, inv)
+		}
+	}
+
+	// Discounts and taxes are business logic (coupon validation, tax rate resolution and
+	// calculation) and require service-layer context this package does not have — the
+	// service layer resolves them and sets TotalDiscount/TotalTax/Total itself once this
+	// bare invoice exists (see TaxService.CalculateTaxesOnInvoice).
+	inv.TotalDiscount = decimal.Zero
+
+	return inv, nil
+}
+
+// Validate validates the invoice coupon DTO
+func (i *InvoiceCoupon) Validate() error {
+	if i.CouponID == "" {
+		return ierr.NewError("coupon_id is required").
+			WithHint("coupon_id is required for invoice coupons").
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}
+
+// Validate validates the line item coupon DTO
+func (c *InvoiceLineItemCoupon) Validate() error {
+	if c.LineItemID == "" {
+		return ierr.NewError("line_item_id is required").
+			WithHint("line_item_id is required for line item coupons").
+			Mark(ierr.ErrValidation)
+	}
+
+	if c.CouponID == "" {
+		return ierr.NewError("coupon_id is required").
+			WithHint("coupon_id is required for line item coupons").
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+// ApplyCouponsToInvoiceRequest represents the request to apply coupons to an invoice
+type ApplyCouponsToInvoiceRequest struct {
+	// invoice contains the invoice to apply coupons to
+	Invoice *invoice.Invoice `json:"invoice" validate:"required"`
+
+	// invoice_coupons contains the coupons to be applied at the invoice level
+	InvoiceCoupons []InvoiceCoupon `json:"invoice_coupons,omitempty"`
+
+	// line_item_coupons contains the coupons to be applied to specific line items
+	LineItemCoupons []InvoiceLineItemCoupon `json:"line_item_coupons,omitempty"`
+}
+
+// Validate validates the ApplyCouponsToInvoiceRequest
+func (r *ApplyCouponsToInvoiceRequest) Validate() error {
+	if r.Invoice == nil {
+		return ierr.NewError("invoice is required").
+			WithHint("invoice is required for applying coupons").
+			Mark(ierr.ErrValidation)
+	}
+
+	// Validate invoice coupons
+	for i, ic := range r.InvoiceCoupons {
+		if err := ic.Validate(); err != nil {
+			return ierr.WithError(err).
+				WithHintf("invalid invoice coupon at index %d", i).
+				WithReportableDetails(map[string]any{
+					"coupon_id": ic.CouponID,
+				}).
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	// Validate line item coupons
+	for i, lic := range r.LineItemCoupons {
+		if err := lic.Validate(); err != nil {
+			return ierr.WithError(err).
+				WithHintf("invalid line item coupon at index %d", i).
+				WithReportableDetails(map[string]any{
+					"coupon_id": lic.CouponID,
+				}).
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	return nil
+}
+
+// DiscountResult holds the result of applying a discount
+type DiscountResult struct {
+	Discount   decimal.Decimal // The discount amount applied
+	FinalPrice decimal.Decimal // The final price after discount
+}
+
+// CreateInvoiceLineItemRequest represents a single line item in an invoice creation request
+type CreateInvoiceLineItemRequest struct {
+	// entity_id is the optional unique identifier of the entity associated with this line item
+	EntityID *string `json:"entity_id,omitempty"`
+
+	// entity_type is the optional type of the entity associated with this line item
+	EntityType *string `json:"entity_type,omitempty"`
+
+	// price_id is the optional unique identifier of the price associated with this line item
+	PriceID *string `json:"price_id,omitempty"`
+
+	// plan_display_name is the optional human-readable name of the plan
+	PlanDisplayName *string `json:"plan_display_name,omitempty"`
+
+	// price_type indicates the type of pricing (fixed, usage, tiered, etc.)
+	PriceType *string `json:"price_type,omitempty"`
+
+	// meter_id is the optional unique identifier of the meter used for usage tracking
+	MeterID *string `json:"meter_id,omitempty"`
+
+	// meter_display_name is the optional human-readable name of the meter
+	MeterDisplayName *string `json:"meter_display_name,omitempty"`
+
+	// price_unit is the optional 3-digit ISO code of the price unit associated with this line item
+	PriceUnit *string `json:"price_unit,omitempty"`
+
+	// price_unit_amount is the optional amount converted to the price unit currency
+	PriceUnitAmount *decimal.Decimal `json:"price_unit_amount,omitempty" swaggertype:"string"`
+
+	// display_name is the optional human-readable name for this line item
+	DisplayName *string `json:"display_name,omitempty"`
+
+	// amount is the monetary amount for this line item
+	Amount decimal.Decimal `json:"amount" validate:"required" swaggertype:"string"`
+
+	// quantity is the quantity of units for this line item
+	Quantity decimal.Decimal `json:"quantity" validate:"required" swaggertype:"string"`
+
+	// period_start is the optional start date of the period this line item covers
+	PeriodStart *time.Time `json:"period_start,omitempty"`
+
+	// period_end is the optional end date of the period this line item covers
+	PeriodEnd *time.Time `json:"period_end,omitempty"`
+
+	// metadata contains additional custom key-value pairs for storing extra information about this line item
+	Metadata types.Metadata `json:"metadata,omitempty"`
+
+	// TODO: !REMOVE after migration
+	// plan_id is the optional unique identifier of the plan associated with this line item
+	PlanID *string `json:"plan_id,omitempty"`
+
+	// commitment_info contains details about any commitment applied to this line item
+	CommitmentInfo *types.CommitmentInfo `json:"commitment_info,omitempty"`
+
+	// prepaid_credits_applied is the amount in invoice currency reduced from this line item due to prepaid credits application.
+	PrepaidCreditsApplied *decimal.Decimal `json:"prepaid_credits_applied,omitempty" swaggertype:"string"`
+
+	// line_item_discount is the discount amount in invoice currency applied directly to this line item.
+	LineItemDiscount *decimal.Decimal `json:"line_item_discount,omitempty" swaggertype:"string"`
+
+	// invoice_level_discount is the discount amount in invoice currency applied to all line items on the invoice.
+	InvoiceLevelDiscount *decimal.Decimal `json:"invoice_level_discount,omitempty" swaggertype:"string"`
+
+	// sub_line_item_id links this line item to the subscription_line_item that generated it.
+	SubscriptionLineItemID *string `json:"subscription_line_item_id,omitempty"`
+
+	// subscription_id overrides the invoice's subscription_id for this specific line item.
+	// Used for grouped invoicing where child line items belong to child subscriptions.
+	SubscriptionID *string `json:"subscription_id,omitempty"`
+
+	// adjusted_entitlement_quantity is the entitlement-covered units deducted from raw usage.
+	AdjustedEntitlementQuantity *decimal.Decimal `json:"adjusted_entitlement_quantity,omitempty" swaggertype:"string"`
+}
+
+func (r *CreateInvoiceLineItemRequest) Validate(invoiceType types.InvoiceType) error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+
+	// Amount may be negative on any invoice type: a credit line offsets charges on the same
+	// document (plan change, multi-addon). Non-negativity is enforced on the invoice aggregates.
+
+	if r.Quantity.IsNegative() {
+		return ierr.NewError("quantity must be non-negative").
+			WithHint("Quantity cannot be negative").
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.PeriodStart != nil && r.PeriodEnd != nil {
+		if r.PeriodEnd.Before(*r.PeriodStart) {
+			return ierr.NewError("period_end must be after period_start").
+				WithHint("Subscription cannot end before it starts").
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	if invoiceType == types.InvoiceTypeSubscription {
+		if r.PriceID == nil {
+			return ierr.NewError("price_id is required for subscription invoice").
+				WithHint("price_id is required for subscription invoice").
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	// Validate prepaid_credits_applied if provided
+	if r.PrepaidCreditsApplied != nil && r.PrepaidCreditsApplied.IsNegative() {
+		return ierr.NewError("prepaid_credits_applied must be non-negative").
+			WithHint("prepaid_credits_applied cannot be negative").
+			WithReportableDetails(map[string]any{
+				"prepaid_credits_applied": r.PrepaidCreditsApplied.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	// Validate line_item_discount if provided
+	if r.LineItemDiscount != nil && r.LineItemDiscount.IsNegative() {
+		return ierr.NewError("line_item_discount must be non-negative").
+			WithHint("line_item_discount cannot be negative").
+			WithReportableDetails(map[string]any{
+				"line_item_discount": r.LineItemDiscount.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	// Validate invoice_level_discount if provided
+	if r.InvoiceLevelDiscount != nil && r.InvoiceLevelDiscount.IsNegative() {
+		return ierr.NewError("invoice_level_discount must be non-negative").
+			WithHint("invoice_level_discount cannot be negative").
+			WithReportableDetails(map[string]any{
+				"invoice_level_discount": r.InvoiceLevelDiscount.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.AdjustedEntitlementQuantity != nil && r.AdjustedEntitlementQuantity.IsNegative() {
+		return ierr.NewError("adjusted_entitlement_quantity must be non-negative").
+			WithHint("adjusted_entitlement_quantity cannot be negative").
+			WithReportableDetails(map[string]any{
+				"adjusted_entitlement_quantity": r.AdjustedEntitlementQuantity.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+func (r *CreateInvoiceLineItemRequest) ToInvoiceLineItem(ctx context.Context, inv *invoice.Invoice) *invoice.InvoiceLineItem {
+	subscriptionID := inv.SubscriptionID
+	if r.SubscriptionID != nil {
+		subscriptionID = r.SubscriptionID
+	}
+
+	lineItem := &invoice.InvoiceLineItem{
+		ID:                          types.GenerateUUIDWithPrefix(types.UUID_PREFIX_INVOICE_LINE_ITEM),
+		InvoiceID:                   inv.ID,
+		CustomerID:                  inv.CustomerID,
+		SubscriptionID:              subscriptionID,
+		PriceID:                     r.PriceID,
+		EntityID:                    r.EntityID,
+		EntityType:                  r.EntityType,
+		PlanDisplayName:             r.PlanDisplayName,
+		PriceType:                   r.PriceType,
+		MeterID:                     r.MeterID,
+		MeterDisplayName:            r.MeterDisplayName,
+		PriceUnit:                   r.PriceUnit,
+		PriceUnitAmount:             r.PriceUnitAmount,
+		DisplayName:                 r.DisplayName,
+		Amount:                      types.RoundToCurrencyPrecision(r.Amount, inv.Currency),
+		Quantity:                    r.Quantity,
+		Currency:                    inv.Currency,
+		PeriodStart:                 r.PeriodStart,
+		PeriodEnd:                   r.PeriodEnd,
+		Metadata:                    r.Metadata,
+		EnvironmentID:               types.GetEnvironmentID(ctx),
+		BaseModel:                   types.GetDefaultBaseModel(ctx),
+		CommitmentInfo:              r.CommitmentInfo,
+		PrepaidCreditsApplied:       lo.FromPtrOr(r.PrepaidCreditsApplied, decimal.Zero),
+		LineItemDiscount:            lo.FromPtrOr(r.LineItemDiscount, decimal.Zero),
+		InvoiceLevelDiscount:        lo.FromPtrOr(r.InvoiceLevelDiscount, decimal.Zero),
+		SubscriptionLineItemID:      r.SubscriptionLineItemID,
+		AdjustedEntitlementQuantity: r.AdjustedEntitlementQuantity,
+	}
+
+	return lineItem
+}
+
+// InvoiceLineItemResponse represents a line item in invoice response payloads
+type InvoiceLineItemResponse struct {
+	invoice.InvoiceLineItem
+
+	// usage_analytics contains usage analytics for this line item (legacy - grouped by source)
+	UsageAnalytics []SourceUsageItem `json:"usage_analytics,omitempty"`
+
+	// usage_breakdown contains flexible usage breakdown for this line item (supports any grouping)
+	UsageBreakdown []UsageBreakdownItem `json:"usage_breakdown,omitempty"`
+}
+
+func NewInvoiceLineItemResponse(item *invoice.InvoiceLineItem) *InvoiceLineItemResponse {
+	if item == nil {
+		return nil
+	}
+
+	return &InvoiceLineItemResponse{
+		InvoiceLineItem: lo.FromPtr(item),
+	}
+}
+
+// UpdateInvoicePaymentRequest represents the request payload for updating invoice payment status
+type UpdateInvoicePaymentRequest struct {
+	// payment_status is the new payment status to set for the invoice (paid, unpaid, etc.)
+	PaymentStatus types.PaymentStatus `json:"payment_status" validate:"required"`
+}
+
+func (r *UpdateInvoicePaymentRequest) Validate() error {
+	if r.PaymentStatus == "" {
+		return ierr.NewError("payment_status is required").
+			WithHint("Payment status is required").
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}
+
+// UpdatePaymentStatusRequest represents the request payload for updating an invoice's payment status
+type UpdatePaymentStatusRequest struct {
+	// payment_status is the new payment status to set for the invoice (paid, unpaid, etc.)
+	PaymentStatus types.PaymentStatus `json:"payment_status" binding:"required"`
+
+	// amount is the optional payment amount to record
+	Amount *decimal.Decimal `json:"amount,omitempty" swaggertype:"string"`
+}
+
+func (r *UpdatePaymentStatusRequest) Validate() error {
+	if r.Amount != nil && r.Amount.IsNegative() {
+		return ierr.NewError("amount must be non-negative").
+			WithHint("Amount cannot be negative").
+			WithReportableDetails(map[string]interface{}{
+				"amount": r.Amount.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+	return nil
+}
+
+// UpdateInvoiceRequest represents the request payload for updating an invoice
+type UpdateInvoiceRequest struct {
+	// invoice_pdf_url is the URL where customers can download the PDF version of this invoice
+	InvoicePDFURL *string    `json:"invoice_pdf_url,omitempty"`
+	DueDate       *time.Time `json:"due_date,omitempty"`
+	// Invoice metadata will be overridden with the request metadata
+	Metadata *types.Metadata `json:"metadata,omitempty"`
+	// When true, recalculates discount from existing coupon associations (draft invoices only).
+	ApplyDiscount bool `json:"apply_discount,omitempty"`
+}
+
+func (r *UpdateInvoiceRequest) Validate() error {
+	// url validation if url is provided
+	if r.InvoicePDFURL != nil {
+		if err := validator.ValidateURL(r.InvoicePDFURL); err != nil {
+			return ierr.WithError(err).
+				WithHint("invalid invoice_pdf_url").
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	// Validate that the due date is not in the past (optional business rule)
+	if r.DueDate != nil && r.DueDate.Before(time.Now().UTC()) {
+		return ierr.NewError("due_date cannot be in the past").
+			WithHint("Due date must be in the future").
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+type AddLineItemRequest struct {
+	DisplayName string          `json:"display_name" validate:"required"`
+	Amount      decimal.Decimal `json:"amount" validate:"required" swaggertype:"string"`
+	Quantity    decimal.Decimal `json:"quantity" validate:"required" swaggertype:"string"`
+	Description *string         `json:"description,omitempty"`
+	PeriodStart *time.Time      `json:"period_start,omitempty"`
+	PeriodEnd   *time.Time      `json:"period_end,omitempty"`
+}
+
+func (r *AddLineItemRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+
+	if r.PeriodStart != nil && r.PeriodEnd != nil && r.PeriodEnd.Before(*r.PeriodStart) {
+		return ierr.NewError("period_end must not be before period_start").
+			WithHint("period_end must not be before period_start").
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.Amount.IsNegative() {
+		return ierr.NewError("amount must be non-negative").
+			WithHint("amount must be non-negative").
+			WithReportableDetails(map[string]any{
+				"amount": r.Amount.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.Quantity.IsNegative() {
+		return ierr.NewError("quantity must be non-negative").
+			WithHint("quantity must be non-negative").
+			WithReportableDetails(map[string]any{
+				"quantity": r.Quantity.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+// AddBulkLineItemRequest adds one or more line items to a draft invoice in a single call.
+type AddBulkLineItemRequest struct {
+	Items []AddLineItemRequest `json:"items" validate:"required,min=1,max=100"`
+}
+
+func (r *AddBulkLineItemRequest) Validate() error {
+	if len(r.Items) == 0 {
+		return ierr.NewError("at least one line item is required").
+			WithHint("please provide at least one line item to add").
+			Mark(ierr.ErrValidation)
+	}
+
+	if len(r.Items) > 100 {
+		return ierr.NewError("too many line items in bulk request").
+			WithHint("maximum 100 line items allowed per request").
+			Mark(ierr.ErrValidation)
+	}
+
+	for i, item := range r.Items {
+		if err := item.Validate(); err != nil {
+			return ierr.WithError(err).
+				WithHintf("line item at index %d is invalid", i).
+				WithReportableDetails(map[string]any{
+					"index": i,
+				}).
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	return nil
+}
+
+type UpdateLineItemRequest struct {
+	DisplayName *string          `json:"display_name,omitempty"`
+	Amount      *decimal.Decimal `json:"amount,omitempty" swaggertype:"string"`
+	Quantity    *decimal.Decimal `json:"quantity,omitempty" swaggertype:"string"`
+	Description *string          `json:"description,omitempty"`
+	PeriodStart *time.Time       `json:"period_start,omitempty"`
+	PeriodEnd   *time.Time       `json:"period_end,omitempty"`
+}
+
+func (r *UpdateLineItemRequest) Validate() error {
+	if r.DisplayName == nil && r.Amount == nil && r.Quantity == nil && r.Description == nil && r.PeriodStart == nil && r.PeriodEnd == nil {
+		return ierr.NewError("at least one field must be provided").
+			WithHint("at least one of display_name, amount, quantity, description, period_start, or period_end must be provided").
+			Mark(ierr.ErrValidation)
+	}
+	if r.PeriodStart != nil && r.PeriodEnd != nil && r.PeriodEnd.Before(*r.PeriodStart) {
+		return ierr.NewError("period_end must not be before period_start").
+			WithHint("period_end must not be before period_start").
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.Amount != nil && r.Amount.IsNegative() {
+		return ierr.NewError("amount must be non-negative").
+			WithHint("amount must be non-negative").
+			WithReportableDetails(map[string]any{
+				"amount": r.Amount.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.Quantity != nil && r.Quantity.IsNegative() {
+		return ierr.NewError("quantity must be non-negative").
+			WithHint("quantity must be non-negative").
+			WithReportableDetails(map[string]any{
+				"quantity": r.Quantity.String(),
+			}).
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+// RemoveBulkLineItemRequest removes one or more line items from a draft invoice in a single call.
+type RemoveBulkLineItemRequest struct {
+	LineItemIDs []string `json:"line_item_ids" validate:"required,min=1,max=100"`
+}
+
+func (r *RemoveBulkLineItemRequest) Validate() error {
+	if len(r.LineItemIDs) == 0 {
+		return ierr.NewError("at least one line item id is required").
+			WithHint("please provide at least one line item id to remove").
+			Mark(ierr.ErrValidation)
+	}
+
+	if len(r.LineItemIDs) > 100 {
+		return ierr.NewError("too many line item ids in bulk request").
+			WithHint("maximum 100 line item ids allowed per request").
+			Mark(ierr.ErrValidation)
+	}
+
+	return nil
+}
+
+type ApplyCouponRequest struct {
+	CouponID   string  `json:"coupon_id" validate:"required"`
+	LineItemID *string `json:"line_item_id,omitempty"`
+}
+
+func (r *ApplyCouponRequest) Validate() error {
+	return validator.ValidateRequest(r)
+}
+
+// ApplyTaxRequest represents the request payload for applying a tax rate to a draft invoice
+type ApplyTaxRequest struct {
+	TaxRateID string `json:"tax_rate_id" validate:"required"`
+}
+
+func (r *ApplyTaxRequest) Validate() error {
+	return validator.ValidateRequest(r)
+}
+
+// InvoiceResponse represents the response payload containing invoice information
+type InvoiceResponse struct {
+	invoice.Invoice
+
+	// overpaid_amount is the amount overpaid if payment_status is OVERPAID (amount_paid - total)
+	OverpaidAmount *decimal.Decimal `json:"overpaid_amount,omitempty" swaggertype:"string"`
+
+	// subscription contains the associated subscription information if requested
+	Subscription *SubscriptionResponse `json:"subscription,omitempty"`
+
+	// customer contains the customer information associated with this invoice
+	Customer *CustomerResponse `json:"customer,omitempty"`
+
+	// tax_applied_records contains the tax applied records associated with this invoice
+	Taxes []*TaxAppliedResponse `json:"taxes,omitempty"`
+
+	// tax_summary breaks total_tax down by behavior and states why no tax was charged, when
+	// none was. Set by WithTaxes once Taxes and TaxExemptionReasonCode are both known.
+	TaxSummary *TaxSummary `json:"tax_summary,omitempty"`
+
+	// line_items contains the individual items that make up this invoice (overrides embedded field)
+	LineItems []*InvoiceLineItemResponse `json:"line_items,omitempty"`
+
+	// coupon_applications contains the coupon applications associated with this invoice (overrides embedded field)
+	CouponApplications []*CouponApplicationResponse `json:"coupon_applications,omitempty"`
+
+	// checkout_session is the payment session gating this invoice, when it was created with checkout
+	CheckoutSession *CheckoutSessionResponse `json:"checkout_session,omitempty"`
+}
+
+// SourceUsageItem represents the usage breakdown for a specific source within a line item
+type SourceUsageItem struct {
+	// source is the name of the event source
+	Source string `json:"source"`
+
+	// cost is the cost attributed to this source for the line item
+	Cost string `json:"cost"`
+
+	// usage is the total usage amount from this source (optional, for additional context)
+	Usage *string `json:"usage,omitempty"`
+
+	// percentage is the percentage of total line item cost from this source (optional)
+	Percentage *string `json:"percentage,omitempty"`
+
+	// event_count is the number of events from this source (optional)
+	EventCount *int `json:"event_count,omitempty"`
+}
+
+// UsageBreakdownItem represents flexible usage breakdown for any grouping within a line item
+type UsageBreakdownItem struct {
+	// cost is the cost attributed to this group for the line item
+	Cost string `json:"cost"`
+
+	// usage is the total usage amount from this group (optional, for additional context)
+	Usage *string `json:"usage,omitempty"`
+
+	// percentage is the percentage of total line item cost from this group (optional)
+	Percentage *string `json:"percentage,omitempty"`
+
+	// event_count is the number of events from this group (optional)
+	EventCount *int `json:"event_count,omitempty"`
+
+	// grouped_by contains the grouping field values (e.g., {"source": "api", "org_id": "org123"})
+	GroupedBy map[string]string `json:"grouped_by"`
+}
+
+// NewInvoiceResponse creates a new invoice response from domain invoice
+func NewInvoiceResponse(inv *invoice.Invoice) *InvoiceResponse {
+	if inv == nil {
+		return nil
+	}
+
+	resp := &InvoiceResponse{
+		Invoice: *inv,
+	}
+
+	// Add overpaid amount if payment status is OVERPAID
+	if inv.PaymentStatus == types.PaymentStatusOverpaid && inv.AmountPaid.GreaterThan(inv.Total) {
+		overpaidAmount := inv.AmountPaid.Sub(inv.Total)
+		resp.WithOverpaidAmount(&overpaidAmount)
+	}
+
+	// Convert line items to response format
+	if inv.LineItems != nil {
+		lineItems := make([]*InvoiceLineItemResponse, len(inv.LineItems))
+		for i, item := range inv.LineItems {
+			lineItems[i] = NewInvoiceLineItemResponse(item)
+		}
+		resp.WithLineItems(lineItems)
+	}
+
+	// Convert coupon applications to response format
+	if inv.CouponApplications != nil {
+		couponApplications := make([]*CouponApplicationResponse, len(inv.CouponApplications))
+		for i, ca := range inv.CouponApplications {
+			couponApplications[i] = &CouponApplicationResponse{
+				CouponApplication: ca,
+			}
+		}
+		resp.WithCouponApplications(couponApplications)
+	}
+
+	return resp
+}
+
+// WithOverpaidAmount sets the overpaid amount for the invoice response
+func (r *InvoiceResponse) WithOverpaidAmount(amount *decimal.Decimal) *InvoiceResponse {
+	r.OverpaidAmount = amount
+	return r
+}
+
+// WithLineItems sets the line items for the invoice response
+func (r *InvoiceResponse) WithLineItems(lineItems []*InvoiceLineItemResponse) *InvoiceResponse {
+	r.LineItems = lineItems
+	return r
+}
+
+// WithSubscription adds subscription information to the invoice response
+func (r *InvoiceResponse) WithSubscription(sub *SubscriptionResponse) *InvoiceResponse {
+	r.Subscription = sub
+	return r
+}
+
+// WithCheckoutSession adds the gating checkout session to the invoice response
+func (r *InvoiceResponse) WithCheckoutSession(session *CheckoutSessionResponse) *InvoiceResponse {
+	r.CheckoutSession = session
+	return r
+}
+
+// WithCustomer adds customer information to the invoice response
+func (r *InvoiceResponse) WithCustomer(customer *CustomerResponse) *InvoiceResponse {
+	r.Customer = customer
+	return r
+}
+
+// WithTaxes sets the tax rows and derives TaxSummary from them plus the already-set
+// TaxExemptionReasonCode. inclusive_tax/exclusive_tax are not columns — they only exist by
+// summing the rows by behavior.
+func (r *InvoiceResponse) WithTaxes(taxes []*TaxAppliedResponse) *InvoiceResponse {
+	r.Taxes = taxes
+	r.TaxSummary = buildTaxSummary(taxes, r.TaxExemptionReasonCode)
+	return r
+}
+
+// WithCouponApplications adds coupon applications to the invoice response
+func (r *InvoiceResponse) WithCouponApplications(couponApplications []*CouponApplicationResponse) *InvoiceResponse {
+	r.CouponApplications = couponApplications
+	return r
+}
+
+// WithUsageAnalytics adds usage analytics to the invoice response
+func (r *InvoiceResponse) WithUsageAnalytics(usageAnalytics map[string][]SourceUsageItem) *InvoiceResponse {
+	for _, lineItem := range r.LineItems {
+		usageAnalyticsItem := usageAnalytics[lineItem.ID]
+		if usageAnalyticsItem != nil {
+			lineItem.UsageAnalytics = usageAnalyticsItem
+		}
+	}
+	return r
+}
+
+// WithUsageBreakdown adds flexible usage breakdown to the invoice response
+func (r *InvoiceResponse) WithUsageBreakdown(usageBreakdown map[string][]UsageBreakdownItem) *InvoiceResponse {
+	for _, lineItem := range r.LineItems {
+		usageBreakdownItem := usageBreakdown[lineItem.ID]
+		if usageBreakdownItem != nil {
+			lineItem.UsageBreakdown = usageBreakdownItem
+		}
+	}
+	return r
+}
+
+// ListInvoicesResponse represents the paginated response for listing invoices
+type ListInvoicesResponse = types.ListResponse[*InvoiceResponse] // @name ListInvoicesResponse
+
+// GetPreviewInvoiceRequest represents the request payload for previewing an invoice
+type GetPreviewInvoiceRequest struct {
+	// hide_zero_charges_line_items indicates whether to hide line items with zero cost
+	HideZeroChargesLineItems bool `json:"hide_zero_charges_line_items,omitempty" default:"false"`
+
+	// subscription_id is the unique identifier of the subscription to preview invoice for
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+
+	// period_start is the optional start date of the period to preview
+	PeriodStart *time.Time `json:"period_start,omitempty"`
+
+	// period_end is the optional end date of the period to preview
+	PeriodEnd *time.Time `json:"period_end,omitempty"`
+}
+
+// CustomerInvoiceSummary represents a summary of customer's invoice status for a specific currency
+type CustomerInvoiceSummary struct {
+	// customer_id is the unique identifier of the customer
+	CustomerID string `json:"customer_id"`
+
+	// currency is the three-letter ISO currency code for this summary
+	Currency string `json:"currency"`
+
+	// total_revenue_amount is the total revenue generated from this customer in this currency
+	TotalRevenueAmount decimal.Decimal `json:"total_revenue_amount" swaggertype:"string"`
+
+	// total_unpaid_amount is the total amount of unpaid invoices in this currency
+	TotalUnpaidAmount decimal.Decimal `json:"total_unpaid_amount" swaggertype:"string"`
+
+	// total_overdue_amount is the total amount of overdue invoices in this currency
+	TotalOverdueAmount decimal.Decimal `json:"total_overdue_amount" swaggertype:"string"`
+
+	// total_invoice_count is the total number of invoices for this customer in this currency
+	TotalInvoiceCount int `json:"total_invoice_count"`
+
+	// unpaid_invoice_count is the number of unpaid invoices for this customer in this currency
+	UnpaidInvoiceCount int `json:"unpaid_invoice_count"`
+
+	// overdue_invoice_count is the number of overdue invoices for this customer in this currency
+	OverdueInvoiceCount int `json:"overdue_invoice_count"`
+
+	// unpaid_usage_charges is the total amount of unpaid usage-based charges in this currency
+	UnpaidUsageCharges decimal.Decimal `json:"unpaid_usage_charges" swaggertype:"string"`
+
+	// unpaid_fixed_charges is the total amount of unpaid fixed charges in this currency
+	UnpaidFixedCharges decimal.Decimal `json:"unpaid_fixed_charges" swaggertype:"string"`
+}
+
+// CustomerMultiCurrencyInvoiceSummary represents invoice summaries across all currencies for a customer
+type CustomerMultiCurrencyInvoiceSummary struct {
+	// customer_id is the unique identifier of the customer
+	CustomerID string `json:"customer_id"`
+
+	// default_currency is the primary currency for this customer
+	DefaultCurrency string `json:"default_currency"`
+
+	// summaries contains the invoice summaries for each currency
+	Summaries []*CustomerInvoiceSummary `json:"summaries"`
+}
+
+// CreateSubscriptionInvoiceRequest represents the request payload for creating a subscription invoice
+type CreateSubscriptionInvoiceRequest struct {
+	// subscription_id is the unique identifier of the subscription to create an invoice for
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+
+	// period_start is the start date of the billing period for this invoice
+	PeriodStart time.Time `json:"period_start" binding:"required"`
+
+	// period_end is the end date of the billing period for this invoice
+	PeriodEnd time.Time `json:"period_end" binding:"required"`
+
+	// is_preview indicates whether this is a preview invoice (not saved to database)
+	IsPreview bool `json:"is_preview"`
+
+	// reference_point defines the point in time used for calculating usage and charges
+	ReferencePoint types.InvoiceReferencePoint `json:"reference_point"`
+
+	// BillingReason optional; when empty, ToDraftRequest defaults to subscription_cycle (subscription_creation flow still forces SUBSCRIPTION_CREATE).
+	BillingReason types.InvoiceBillingReason `json:"billing_reason,omitempty"`
+
+	// OpeningInvoiceAdjustmentAmount is internal: same as InvoiceComputeRequest. Not in public JSON.
+	OpeningInvoiceAdjustmentAmount *decimal.Decimal `json:"-"`
+}
+
+// ToDraftRequest builds a CreateDraftInvoiceRequest from the subscription invoice request
+// and pre-fetched subscription fields, avoiding a redundant DB fetch.
+func (r *CreateSubscriptionInvoiceRequest) ToDraftRequest(customerID, subscriptionID, currency, billingPeriod string) CreateDraftInvoiceRequest {
+	billingReason := r.BillingReason
+	if billingReason == "" {
+		billingReason = types.InvoiceBillingReasonSubscriptionCycle
+	}
+	req := CreateDraftInvoiceRequest{
+		CustomerID:     customerID,
+		SubscriptionID: lo.ToPtr(subscriptionID),
+		InvoiceType:    types.InvoiceTypeSubscription,
+		Currency:       currency,
+		BillingPeriod:  &billingPeriod,
+		PeriodStart:    &r.PeriodStart,
+		PeriodEnd:      &r.PeriodEnd,
+		BillingReason:  billingReason,
+	}
+	if r.BillingReason != "" {
+		req.BillingReason = r.BillingReason
+	} else if r.ReferencePoint == types.ReferencePointCancel {
+		req.BillingReason = types.InvoiceBillingReasonProration
+	}
+	return req
+}
+
+func (r *CreateSubscriptionInvoiceRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+
+	if r.BillingReason != "" {
+		if err := r.BillingReason.Validate(); err != nil {
+			return err
+		}
+	}
+
+	if err := r.ReferencePoint.Validate(); err != nil {
+		return err
+	}
+
+	if r.PeriodStart.After(r.PeriodEnd) {
+		return ierr.NewError("period_start must be before period_end").
+			WithHint("Invoice period start must be before period end").
+			Mark(ierr.ErrValidation)
+	}
+
+	if r.BillingReason != "" {
+		if err := r.BillingReason.Validate(); err != nil {
+			return err
+		}
+	}
+
+	if r.OpeningInvoiceAdjustmentAmount != nil && r.BillingReason == types.InvoiceBillingReasonSubscriptionUpdate {
+		if r.OpeningInvoiceAdjustmentAmount.IsNegative() {
+			return ierr.NewError("opening_invoice_adjustment_amount must be non-negative").
+				WithHint("Opening invoice adjustment amount must be non-negative").
+				WithReportableDetails(map[string]any{
+					"opening_invoice_adjustment_amount": r.OpeningInvoiceAdjustmentAmount.String(),
+					"billing_reason":                    r.BillingReason.String(),
+				}).
+				Mark(ierr.ErrValidation)
+		}
+	}
+
+	return nil
+}
+
+// PaymentParameters encapsulates payment-related parameters for invoice processing
+type PaymentParameters struct {
+	// CollectionMethod defines how the payment should be collected (charge_automatically or send_invoice)
+	CollectionMethod *types.CollectionMethod `json:"collection_method,omitempty"`
+
+	// PaymentBehavior defines the behavior when payment fails (default_active, error_if_incomplete, etc.)
+	PaymentBehavior *types.PaymentBehavior `json:"payment_behavior,omitempty"`
+
+	// PaymentMethodID is the optional ID of the payment method to use for automatic charges
+	PaymentMethodID *string `json:"payment_method_id,omitempty"`
+}
+
+// NewPaymentParameters creates a new PaymentParameters from subscription data
+func NewPaymentParameters(collectionMethod types.CollectionMethod, paymentBehavior types.PaymentBehavior, paymentMethodID *string) *PaymentParameters {
+	return &PaymentParameters{
+		CollectionMethod: &collectionMethod,
+		PaymentBehavior:  &paymentBehavior,
+		PaymentMethodID:  paymentMethodID,
+	}
+}
+
+// NewPaymentParametersFromSubscription creates PaymentParameters from subscription fields
+func NewPaymentParametersFromSubscription(collectionMethod string, paymentBehavior string, paymentMethodID *string) *PaymentParameters {
+	cm := types.CollectionMethod(collectionMethod)
+	pb := types.PaymentBehavior(paymentBehavior)
+	return &PaymentParameters{
+		CollectionMethod: &cm,
+		PaymentBehavior:  &pb,
+		PaymentMethodID:  paymentMethodID,
+	}
+}
+
+// NormalizePaymentParameters handles backward compatibility for old collection behaviors
+// If collection_method is "default_incomplete", it converts to charge_automatically + default_incomplete
+func (p *PaymentParameters) NormalizePaymentParameters() *PaymentParameters {
+	if p.CollectionMethod != nil && string(*p.CollectionMethod) == "default_incomplete" {
+		// Convert old default_incomplete collection behavior to new format
+		// collection_method: charge_automatically, payment_behavior: default_incomplete
+		normalized := &PaymentParameters{
+			CollectionMethod: lo.ToPtr(types.CollectionMethodChargeAutomatically),
+			PaymentBehavior:  lo.ToPtr(types.PaymentBehaviorDefaultIncomplete),
+			PaymentMethodID:  p.PaymentMethodID,
+		}
+		return normalized
+	}
+	return p
+}
+
+type InvoiceVoidRequest struct {
+	// metadata will only add/override the values of key-value pairs provided in this request.
+	// for a complete override of metadata field, refer update invoice (PUT /invoices) endpoint
+	Metadata types.Metadata `json:"metadata,omitempty"`
+
+	InvoiceStateChangeSource
+}
+
+func (r *InvoiceVoidRequest) SourceID() string {
+	if r == nil {
+		return ""
+	}
+
+	return r.InvoiceStateChangeSource.SourceID()
+}
+
+func (r *InvoiceVoidRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+// VoidOldPendingInvoicesResponse represents the response for the void old pending invoices cron job
+type VoidOldPendingInvoicesResponse struct {
+	Items   []*VoidOldPendingInvoicesResponseItem `json:"items"`
+	Total   int                                   `json:"total"`
+	Success int                                   `json:"success"`
+	Failed  int                                   `json:"failed"`
+}
+
+// VoidOldPendingInvoicesResponseItem represents the response item for each environment processed
+type VoidOldPendingInvoicesResponseItem struct {
+	TenantID      string `json:"tenant_id"`
+	EnvironmentID string `json:"environment_id"`
+	Count         int    `json:"count"`
+	Success       int    `json:"success"`
+	Failed        int    `json:"failed"`
+}
+
+// GetInvoiceWithBreakdownRequest represents the request for getting an invoice with breakdown
+type GetInvoiceWithBreakdownRequest struct {
+	// ID is the unique identifier of the invoice
+	ID string `json:"id" validate:"required"`
+
+	// GroupBy contains the grouping parameters for flexible usage breakdown
+	GroupBy []string `json:"group_by,omitempty"`
+
+	// Force Runtime recalculation of usage breakdown
+	ForceRuntimeRecalculation bool `json:"force_runtime_recalculation,omitempty" default:"false"`
+
+	// Expand is a comma-separated list of related fields to include on the response.
+	// Currently supports: "tax_applied.tax_rate" to attach the underlying rate details
+	// (name/code/percentage) to each entry in `taxes` so callers can render the per-rate
+	// calculation without a separate lookup.
+	Expand string `json:"expand,omitempty"`
+}
+
+func (r *GetInvoiceWithBreakdownRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+type GetUnpaidInvoicesToBePaidRequest struct {
+	// customer_id is the unique identifier of the customer
+	CustomerID string `json:"customer_id" validate:"required"`
+
+	// currency is the three-letter ISO currency code for this request
+	Currency string `json:"currency" validate:"required"`
+
+	// CurrentPeriodStarts maps subscription ID to the period start whose usage the caller counts
+	// live; that period's draft is skipped and its applied credits reported instead.
+	CurrentPeriodStarts map[string]time.Time `json:"-"`
+}
+
+func (r *GetUnpaidInvoicesToBePaidRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+type GetUnpaidInvoicesToBePaidResponse struct {
+	// invoices is the list of unpaid invoices to be paid
+	Invoices []*InvoiceResponse `json:"invoices"`
+
+	// total_unpaid_amount is the total amount of unpaid invoices to be paid
+	TotalUnpaidAmount decimal.Decimal `json:"total_unpaid_amount" swaggertype:"string"`
+
+	// total_unpaid_usage_charges is the total amount of unpaid usage charges to be paid
+	TotalUnpaidUsageCharges decimal.Decimal `json:"total_unpaid_usage_charges" swaggertype:"string"`
+
+	// total_unpaid_fixed_charges is the total amount of unpaid fixed charges to be paid
+	TotalUnpaidFixedCharges decimal.Decimal `json:"total_unpaid_fixed_charges" swaggertype:"string"`
+
+	// total paid invoice amount
+	TotalPaidInvoiceAmount decimal.Decimal `json:"total_paid_invoice_amount" swaggertype:"string"`
+
+	// CurrentPeriodCreditsApplied maps subscription ID to credits already applied to its
+	// current-period draft (credits settled at expiry), in the wallet's currency.
+	CurrentPeriodCreditsApplied map[string]decimal.Decimal `json:"-"`
+}
+
+type ApplyExternalInvoiceDiscountRequest struct {
+	DiscountAmount decimal.Decimal `json:"discount_amount"`
+	MetadataKey    string          `json:"metadata_key,omitempty"`
+	MetadataJSON   string          `json:"metadata_json,omitempty"`
+}
+
+func (r *ApplyExternalInvoiceDiscountRequest) Validate() error {
+	if err := validator.ValidateRequest(r); err != nil {
+		return err
+	}
+	return nil
+}
+
+// TaxSummary breaks an invoice's total_tax down by behavior and states why no tax was
+// charged, when none was.
+type TaxSummary struct {
+	TotalInclusiveTax decimal.Decimal      `json:"inclusive_tax" swaggertype:"string"`
+	TotalExclusiveTax decimal.Decimal      `json:"exclusive_tax" swaggertype:"string"`
+	TotalTax          decimal.Decimal      `json:"total_tax" swaggertype:"string"`
+	Exemption         *TaxExemptionSummary `json:"exemption"`
+}
+
+// TaxExemptionSummary is non-nil only when no tax was charged. Its Reason is
+// derived via TaxExemptionReasonCode.DisplayLabel(), never stored.
+type TaxExemptionSummary struct {
+	ReasonCode types.TaxExemptionReasonCode `json:"reason_code"`
+	Reason     string                       `json:"reason"`
+}
+
+func buildTaxSummary(taxes []*TaxAppliedResponse, reasonCode *types.TaxExemptionReasonCode) *TaxSummary {
+	// A reason code means nothing was charged, so the totals are zero by definition.
+	if reasonCode != nil {
+		return &TaxSummary{
+			Exemption: &TaxExemptionSummary{
+				ReasonCode: *reasonCode,
+				Reason:     reasonCode.DisplayLabel(),
+			},
+		}
+	}
+
+	var inclusiveTax, exclusiveTax decimal.Decimal
+	for _, t := range taxes {
+		switch t.TaxBehavior {
+		case types.TaxBehaviorInclusive:
+			inclusiveTax = inclusiveTax.Add(t.TaxAmount)
+		case types.TaxBehaviorExclusive:
+			exclusiveTax = exclusiveTax.Add(t.TaxAmount)
+		}
+	}
+
+	return &TaxSummary{
+		TotalInclusiveTax: inclusiveTax,
+		TotalExclusiveTax: exclusiveTax,
+		TotalTax:          inclusiveTax.Add(exclusiveTax),
+	}
+}
+
+// InvoicePDFRequest selects which rendering of an invoice to return.
+type InvoicePDFRequest struct {
+	InvoiceID string `json:"invoice_id" validate:"required"`
+	// ForceGenerate re-renders even when a stored PDF exists.
+	ForceGenerate bool `json:"force_generate"`
+}

@@ -1,0 +1,123 @@
+package cron
+
+import (
+	"context"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/ee/service"
+	"github.com/flexprice/flexprice/internal/logger"
+	cronModels "github.com/flexprice/flexprice/internal/temporal/models"
+	"go.temporal.io/sdk/activity"
+)
+
+// SubscriptionCronActivities wraps subscription-related cron jobs: auto-cancellation, billing
+// period updates, and renewal-due alerts (one SubscriptionService).
+type SubscriptionCronActivities struct {
+	subscriptionService service.SubscriptionService
+	logger              *logger.Logger
+}
+
+// NewSubscriptionCronActivities builds activities for subscription cron workflows.
+func NewSubscriptionCronActivities(subscriptionService service.SubscriptionService, log *logger.Logger) *SubscriptionCronActivities {
+	return &SubscriptionCronActivities{
+		subscriptionService: subscriptionService,
+		logger:              log,
+	}
+}
+
+// ProcessAutoCancellationActivity cancels subscriptions past their grace period.
+func (a *SubscriptionCronActivities) ProcessAutoCancellationActivity(ctx context.Context) (*cronModels.SubscriptionAutoCancellationWorkflowResult, error) {
+	log := activity.GetLogger(ctx)
+	log.Info("Processing subscription auto-cancellations")
+
+	if err := a.subscriptionService.ProcessAutoCancellationSubscriptions(ctx); err != nil {
+		a.logger.Error(ctx, "ProcessAutoCancellationActivity failed",
+			"error", err,
+		)
+		return nil, err
+	}
+
+	result := &cronModels.SubscriptionAutoCancellationWorkflowResult{}
+	log.Info("Completed subscription auto-cancellation processing")
+	return result, nil
+}
+
+// ProcessOverdueSubscriptionInvoicesActivity marks subscriptions with overdue renewal invoices incomplete.
+func (a *SubscriptionCronActivities) ProcessOverdueSubscriptionInvoicesActivity(ctx context.Context) error {
+	if err := a.subscriptionService.ProcessOverdueSubscriptionInvoices(ctx); err != nil {
+		a.logger.Error(ctx, "ProcessOverdueSubscriptionInvoicesActivity failed", "error", err)
+		return err
+	}
+
+	return nil
+}
+
+// UpdateBillingPeriodsActivity runs the same work as POST /v1/cron/subscriptions/update-periods.
+func (a *SubscriptionCronActivities) UpdateBillingPeriodsActivity(ctx context.Context) (*cronModels.SubscriptionBillingPeriodsWorkflowResult, error) {
+	log := activity.GetLogger(ctx)
+	log.Info("Updating subscription billing periods (cron activity)")
+	_, err := a.subscriptionService.UpdateBillingPeriods(ctx)
+	if err != nil {
+		a.logger.Error(ctx, "UpdateBillingPeriodsActivity failed",
+			"error", err,
+		)
+		return nil, err
+	}
+	return &cronModels.SubscriptionBillingPeriodsWorkflowResult{}, nil
+}
+
+// ProcessTrialEndDueActivity runs the same work as POST /v1/cron/subscriptions/process-trial-end-due.
+func (a *SubscriptionCronActivities) ProcessTrialEndDueActivity(ctx context.Context) (*cronModels.SubscriptionTrialEndDueWorkflowResult, error) {
+	log := activity.GetLogger(ctx)
+	log.Info("Processing trial end due subscriptions (cron activity)")
+	resp, err := a.subscriptionService.ProcessTrialEndDue(ctx)
+	if err != nil {
+		a.logger.Error(ctx, "ProcessTrialEndDueActivity failed",
+			"error", err,
+		)
+		return nil, err
+	}
+	return &cronModels.SubscriptionTrialEndDueWorkflowResult{
+		TotalSuccess: resp.TotalSuccess,
+		TotalFailed:  resp.TotalFailed,
+		StartAt:      resp.StartAt,
+	}, nil
+}
+
+// ProcessRenewalDueAlertsActivity runs the same work as POST /v1/cron/subscriptions/renewal-due-alerts.
+func (a *SubscriptionCronActivities) ProcessRenewalDueAlertsActivity(ctx context.Context, runTime time.Time) (*cronModels.SubscriptionRenewalDueAlertsWorkflowResult, error) {
+	log := activity.GetLogger(ctx)
+	log.Info("Processing subscription renewal-due alerts (cron activity)")
+	if runTime.IsZero() {
+		runTime = time.Now()
+	}
+	if err := a.subscriptionService.ProcessSubscriptionRenewalDueAlert(ctx, runTime); err != nil {
+		a.logger.Error(ctx, "ProcessRenewalDueAlertsActivity failed",
+			"error", err,
+			"run_time", runTime,
+		)
+		return nil, err
+	}
+	return &cronModels.SubscriptionRenewalDueAlertsWorkflowResult{}, nil
+}
+
+// ProcessAutoInvoiceThresholdBillingActivity runs ProcessAutoInvoiceThresholdBilling for all qualifying subscriptions.
+func (a *SubscriptionCronActivities) ProcessAutoInvoiceThresholdBillingActivity(ctx context.Context) (*cronModels.AutoInvoiceThresholdBillingWorkflowResult, error) {
+	log := activity.GetLogger(ctx)
+	log.Info("Processing auto invoice threshold billing (cron activity)")
+
+	result, err := a.subscriptionService.ProcessAutoInvoiceThresholdBilling(ctx)
+	if err != nil {
+		a.logger.Error(ctx, "ProcessAutoInvoiceThresholdBillingActivity failed",
+			"error", err,
+		)
+		return nil, err
+	}
+
+	return &cronModels.AutoInvoiceThresholdBillingWorkflowResult{
+		TotalChecked:  result.TotalChecked,
+		TotalInvoiced: result.TotalInvoiced,
+		TotalSkipped:  result.TotalSkipped,
+		TotalFailed:   result.TotalFailed,
+	}, nil
+}

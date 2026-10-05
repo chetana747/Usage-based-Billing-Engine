@@ -1,0 +1,900 @@
+package ent
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/flexprice/flexprice/ent"
+	"github.com/flexprice/flexprice/ent/payment"
+	"github.com/flexprice/flexprice/ent/paymentattempt"
+	"github.com/flexprice/flexprice/ent/predicate"
+	entSchema "github.com/flexprice/flexprice/ent/schema"
+	"github.com/flexprice/flexprice/internal/cache"
+	domainPayment "github.com/flexprice/flexprice/internal/domain/payment"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/flexprice/flexprice/internal/postgres"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/lib/pq"
+)
+
+type paymentRepository struct {
+	client     postgres.IClient
+	log        *logger.Logger
+	queryOpts  PaymentQueryOptions
+	redisCache cache.RedisCache
+}
+
+func NewPaymentRepository(client postgres.IClient, log *logger.Logger, redisCache cache.RedisCache) domainPayment.Repository {
+	return &paymentRepository{
+		client:     client,
+		log:        log,
+		queryOpts:  PaymentQueryOptions{},
+		redisCache: redisCache,
+	}
+}
+
+func (r *paymentRepository) Create(ctx context.Context, p *domainPayment.Payment) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "creating payment",
+		"payment_id", p.ID,
+		"tenant_id", p.TenantID,
+		"destination_type", p.DestinationType,
+		"destination_id", p.DestinationID,
+		"amount", p.Amount,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "create", map[string]interface{}{
+		"payment_id":       p.ID,
+		"tenant_id":        p.TenantID,
+		"destination_type": p.DestinationType,
+		"destination_id":   p.DestinationID,
+	})
+	defer FinishSpan(span)
+
+	// Set environment ID from context if not already set
+	if p.EnvironmentID == "" {
+		p.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	// Not a loop var; local var shadowing package import, used synchronously below.
+	payment, err := client.Payment.Create(). // nosemgrep: trailofbits.go.invalid-usage-of-modified-variable.invalid-usage-of-modified-variable
+							SetID(p.ID).
+							SetIdempotencyKey(p.IdempotencyKey).
+							SetDestinationType(string(p.DestinationType)).
+							SetDestinationID(p.DestinationID).
+							SetPaymentMethodType(string(p.PaymentMethodType)).
+							SetPaymentMethodID(p.PaymentMethodID).
+							SetNillablePaymentGateway(p.PaymentGateway).
+							SetNillableGatewayPaymentID(p.GatewayPaymentID).
+							SetNillableGatewayTrackingID(p.GatewayTrackingID).
+							SetGatewayMetadata(p.GatewayMetadata).
+							SetAmount(p.Amount).
+							SetCurrency(p.Currency).
+							SetPaymentStatus(string(p.PaymentStatus)).
+							SetTrackAttempts(p.TrackAttempts).
+							SetMetadata(p.Metadata).
+							SetNillableSucceededAt(p.SucceededAt).
+							SetNillableFailedAt(p.FailedAt).
+							SetNillableRefundedAt(p.RefundedAt).
+							SetNillableVoidedAt(p.VoidedAt).
+							SetNillableErrorMessage(p.ErrorMessage).
+							SetNillableRecordedAt(p.RecordedAt).
+							SetTenantID(p.TenantID).
+							SetCreatedAt(p.CreatedAt).
+							SetUpdatedAt(p.UpdatedAt).
+							SetCreatedBy(p.CreatedBy).
+							SetUpdatedBy(p.UpdatedBy).
+							SetEnvironmentID(p.EnvironmentID).
+							Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsConstraintError(err) {
+			var pqErr *pq.Error
+			if errors.As(err, &pqErr) && pqErr.Constraint == entSchema.Idx_tenant_environment_payment_idempotency_key_unique {
+				// Tag this specific constraint so callers can tell an idempotency
+				// race apart from any other constraint violation (a duplicate
+				// payment ID, say). Both stay ErrAlreadyExists → HTTP 409; only
+				// this one means "re-fetching by idempotency key will find it".
+				return ierr.WithError(errors.Join(err, domainPayment.ErrIdempotencyKeyConflict)).
+					WithHint("A payment with this idempotency key already exists").
+					WithReportableDetails(map[string]interface{}{
+						"idempotency_key": p.IdempotencyKey,
+					}).
+					Mark(ierr.ErrAlreadyExists)
+			}
+			return ierr.WithError(err).
+				WithHint("Payment creation failed due to constraint violation").
+				Mark(ierr.ErrAlreadyExists)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to create payment").
+			WithReportableDetails(map[string]interface{}{
+				"payment_id":       p.ID,
+				"destination_id":   p.DestinationID,
+				"destination_type": p.DestinationType,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	*p = *domainPayment.FromEnt(payment)
+	return nil
+}
+
+func (r *paymentRepository) Get(ctx context.Context, id string) (*domainPayment.Payment, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "get", map[string]interface{}{
+		"payment_id": id,
+		"tenant_id":  types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	// Try to get from cache first
+	if cachedPayment := r.GetCache(ctx, id); cachedPayment != nil {
+		return cachedPayment, nil
+	}
+
+	client := r.client.Reader(ctx)
+
+	r.log.Debug(ctx, "getting payment",
+		"payment_id", id,
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	p, err := client.Payment.Query().
+		Where(
+			payment.ID(id),
+			payment.EnvironmentID(types.GetEnvironmentID(ctx)),
+			payment.TenantID(types.GetTenantID(ctx)),
+		).
+		WithAttempts().
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHint("Payment not found").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to retrieve payment").
+			WithReportableDetails(map[string]interface{}{
+				"payment_id": id,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	paymentData := domainPayment.FromEnt(p)
+	r.SetCache(ctx, paymentData)
+	return paymentData, nil
+}
+
+func (r *paymentRepository) List(ctx context.Context, filter *types.PaymentFilter) ([]*domainPayment.Payment, error) {
+	if filter == nil {
+		filter = &types.PaymentFilter{
+			QueryFilter: types.NewDefaultQueryFilter(),
+		}
+	}
+
+	client := r.client.Reader(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "list", map[string]interface{}{
+		"tenant_id": types.GetTenantID(ctx),
+		"filter":    filter,
+	})
+	defer FinishSpan(span)
+
+	query := client.Payment.Query().WithAttempts()
+
+	// Apply entity-specific filters
+	query = r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+
+	// Apply common query options
+	query = ApplyQueryOptions(ctx, query, filter, r.queryOpts)
+
+	payments, err := query.All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list payments").
+			WithReportableDetails(map[string]interface{}{
+				"filter": filter,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	return domainPayment.FromEntList(payments), nil
+}
+
+// ListScopedByDestinationStatusGateway returns payments across all tenants and
+// environments matching the given destination type, payment status, and gateway.
+func (r *paymentRepository) ListScopedByDestinationStatusGateway(ctx context.Context, destinationType types.PaymentDestinationType, status types.PaymentStatus, gateway types.PaymentGatewayType) ([]domainPayment.ScopedPayment, error) {
+	span := StartRepositorySpan(ctx, "payment", "list_scoped_by_destination_status_gateway", map[string]interface{}{
+		"destination_type": destinationType,
+		"payment_status":   status,
+		"gateway":          gateway,
+	})
+	defer FinishSpan(span)
+
+	const query = `
+		SELECT id, tenant_id, environment_id, gateway_payment_id
+		FROM payments
+		WHERE destination_type = $1
+		  AND payment_status   = $2
+		  AND payment_gateway  = $3
+		  AND status           = 'published'
+		  AND gateway_payment_id <> ''`
+
+	rows, err := r.client.Reader(ctx).QueryContext(ctx, query,
+		string(destinationType),
+		string(status),
+		string(gateway),
+	)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).WithHint("failed to list scoped payments").Mark(ierr.ErrDatabase)
+	}
+	defer rows.Close()
+
+	var result []domainPayment.ScopedPayment
+	for rows.Next() {
+		var row domainPayment.ScopedPayment
+		if err := rows.Scan(&row.PaymentID, &row.TenantID, &row.EnvironmentID, &row.GatewayPaymentID); err != nil {
+			SetSpanError(span, err)
+			return nil, ierr.WithError(err).WithHint("failed to scan scoped payment row").Mark(ierr.ErrDatabase)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).WithHint("failed to iterate scoped payment rows").Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return result, nil
+}
+
+func (r *paymentRepository) Count(ctx context.Context, filter *types.PaymentFilter) (int, error) {
+	client := r.client.Reader(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "count", map[string]interface{}{
+		"tenant_id": types.GetTenantID(ctx),
+		"filter":    filter,
+	})
+	defer FinishSpan(span)
+
+	query := client.Payment.Query()
+
+	query = ApplyBaseFilters(ctx, query, filter, r.queryOpts)
+	query = r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+
+	count, err := query.Count(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return 0, ierr.WithError(err).
+			WithHint("Failed to count payments").
+			WithReportableDetails(map[string]interface{}{
+				"filter": filter,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	return count, nil
+}
+
+func (r *paymentRepository) Update(ctx context.Context, p *domainPayment.Payment) error {
+	return r.update(ctx, p, nil)
+}
+
+// UpdateWithExpectedStatus applies the update only while the stored status
+// still matches expectedStatus. The predicate makes the caller's lifecycle
+// check and this write a single atomic operation, so two concurrent updates
+// cannot both validate against the same status and then overwrite each other.
+func (r *paymentRepository) UpdateWithExpectedStatus(ctx context.Context, p *domainPayment.Payment, expectedStatus types.PaymentStatus) error {
+	return r.update(ctx, p, &expectedStatus)
+}
+
+func (r *paymentRepository) update(ctx context.Context, p *domainPayment.Payment, expectedStatus *types.PaymentStatus) error {
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "updating payment",
+		"payment_id", p.ID,
+		"tenant_id", p.TenantID,
+	)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "update", map[string]interface{}{
+		"payment_id": p.ID,
+		"tenant_id":  p.TenantID,
+	})
+	defer FinishSpan(span)
+
+	predicates := []predicate.Payment{
+		payment.EnvironmentID(types.GetEnvironmentID(ctx)),
+		payment.ID(p.ID),
+		payment.TenantID(p.TenantID),
+	}
+	if expectedStatus != nil {
+		predicates = append(predicates, payment.PaymentStatus(string(*expectedStatus)))
+	}
+
+	affected, err := client.Payment.Update().
+		Where(predicates...).
+		SetPaymentStatus(string(p.PaymentStatus)).
+		SetPaymentMethodID(p.PaymentMethodID).
+		SetAmount(p.Amount).
+		SetNillablePaymentGateway(p.PaymentGateway).
+		SetNillableGatewayPaymentID(p.GatewayPaymentID).
+		SetNillableGatewayTrackingID(p.GatewayTrackingID).
+		SetGatewayMetadata(p.GatewayMetadata).
+		SetTrackAttempts(p.TrackAttempts).
+		SetMetadata(p.Metadata).
+		SetUpdatedAt(time.Now().UTC()).
+		SetNillableRecordedAt(p.RecordedAt).
+		SetNillableSucceededAt(p.SucceededAt).
+		SetNillableFailedAt(p.FailedAt).
+		SetNillableRefundedAt(p.RefundedAt).
+		SetNillableVoidedAt(p.VoidedAt).
+		SetNillableErrorMessage(p.ErrorMessage).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to update payment").
+			WithReportableDetails(map[string]interface{}{
+				"payment_id": p.ID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	// A bulk update reports a missing row as zero rows affected with a nil error,
+	// so this count is the only signal that the write did not land — without it
+	// an unknown ID, or one belonging to another tenant, returns success having
+	// changed nothing.
+	if affected == 0 {
+		// With a status predicate, the row may well exist and simply have moved
+		// to a different status between the caller's read and this write.
+		// Reported as a conflict so the caller re-reads rather than treating the
+		// payment as gone.
+		var mutationErr error
+		if expectedStatus != nil {
+			mutationErr = ierr.NewError("payment status changed during update").
+				WithHint("The payment was modified concurrently. Retry with the current payment state.").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id":      p.ID,
+					"expected_status": *expectedStatus,
+				}).
+				Mark(ierr.ErrVersionConflict)
+		} else {
+			mutationErr = ierr.NewError("payment not found").
+				WithHint("Payment not found").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id": p.ID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+
+		SetSpanError(span, mutationErr)
+		return mutationErr
+	}
+
+	r.DeleteCache(ctx, p.ID)
+	return nil
+}
+
+func (r *paymentRepository) Delete(ctx context.Context, id string) error {
+	return r.delete(ctx, id, nil)
+}
+
+// DeleteWithExpectedStatus archives the payment only while the stored status
+// still matches expectedStatus, so a deletability check made by the caller and
+// this write happen as one atomic operation.
+func (r *paymentRepository) DeleteWithExpectedStatus(ctx context.Context, id string, expectedStatus types.PaymentStatus) error {
+	return r.delete(ctx, id, &expectedStatus)
+}
+
+func (r *paymentRepository) delete(ctx context.Context, id string, expectedStatus *types.PaymentStatus) error {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "delete", map[string]interface{}{
+		"payment_id": id,
+		"tenant_id":  types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "deleting payment",
+		"payment_id", id,
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	predicates := []predicate.Payment{
+		payment.EnvironmentID(types.GetEnvironmentID(ctx)),
+		payment.ID(id),
+		payment.TenantID(types.GetTenantID(ctx)),
+	}
+	if expectedStatus != nil {
+		predicates = append(predicates, payment.PaymentStatus(string(*expectedStatus)))
+	}
+
+	affected, err := client.Payment.Update().
+		Where(predicates...).
+		SetStatus(string(types.StatusArchived)).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		SetUpdatedAt(time.Now().UTC()).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to delete payment").
+			WithReportableDetails(map[string]interface{}{
+				"payment_id": id,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	// As in update: zero rows affected is the only signal that nothing was
+	// archived, since a bulk update does not report a missing row as an error.
+	if affected == 0 {
+		var mutationErr error
+		if expectedStatus != nil {
+			mutationErr = ierr.NewError("payment status changed during delete").
+				WithHint("The payment was modified concurrently. Re-read it before deleting.").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id":      id,
+					"expected_status": *expectedStatus,
+				}).
+				Mark(ierr.ErrVersionConflict)
+		} else {
+			mutationErr = ierr.NewError("payment not found").
+				WithHint("Payment not found").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+
+		SetSpanError(span, mutationErr)
+		return mutationErr
+	}
+
+	r.DeleteCache(ctx, id)
+	return nil
+}
+
+func (r *paymentRepository) GetByIdempotencyKey(ctx context.Context, key string) (*domainPayment.Payment, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "get_by_idempotency_key", map[string]interface{}{
+		"idempotency_key": key,
+		"tenant_id":       types.GetTenantID(ctx),
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+
+	r.log.Debug(ctx, "getting payment by idempotency key",
+		"idempotency_key", key,
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	p, err := client.Payment.Query().
+		Where(
+			payment.IdempotencyKey(key),
+			payment.EnvironmentID(types.GetEnvironmentID(ctx)),
+			payment.TenantID(types.GetTenantID(ctx)),
+		).
+		WithAttempts().
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHint("Payment not found").
+				WithReportableDetails(map[string]interface{}{
+					"idempotency_key": key,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get payment by idempotency key").
+			WithReportableDetails(map[string]interface{}{
+				"idempotency_key": key,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	return domainPayment.FromEnt(p), nil
+}
+
+// Payment attempt operations
+
+func (r *paymentRepository) CreateAttempt(ctx context.Context, a *domainPayment.PaymentAttempt) error {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "create_attempt", map[string]interface{}{
+		"attempt_id": a.ID,
+		"payment_id": a.PaymentID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "creating payment attempt",
+		"attempt_id", a.ID,
+		"payment_id", a.PaymentID,
+		"status", a.Status,
+		"payment_status", a.PaymentStatus,
+	)
+
+	// Set environment ID from context if not already set
+	if a.EnvironmentID == "" {
+		a.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	attempt, err := client.PaymentAttempt.Create().
+		SetID(a.ID).
+		SetPaymentID(a.PaymentID).
+		SetAttemptNumber(a.AttemptNumber).
+		SetPaymentStatus(string(a.PaymentStatus)).
+		SetNillableGatewayAttemptID(a.GatewayAttemptID).
+		SetNillableErrorMessage(a.ErrorMessage).
+		SetMetadata(a.Metadata).
+		SetTenantID(a.TenantID).
+		SetStatus(string(a.Status)).
+		SetCreatedAt(a.CreatedAt).
+		SetUpdatedAt(a.UpdatedAt).
+		SetCreatedBy(a.CreatedBy).
+		SetUpdatedBy(a.UpdatedBy).
+		SetEnvironmentID(a.EnvironmentID).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithHint("Failed to create payment attempt").
+			WithReportableDetails(map[string]interface{}{
+				"attempt_id": a.ID,
+				"payment_id": a.PaymentID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	*a = *domainPayment.FromEntAttempt(attempt)
+	return nil
+}
+
+func (r *paymentRepository) GetAttempt(ctx context.Context, id string) (*domainPayment.PaymentAttempt, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "get_attempt", map[string]interface{}{
+		"attempt_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+
+	r.log.Debug(ctx, "getting payment attempt",
+		"attempt_id", id,
+	)
+
+	a, err := client.PaymentAttempt.Query().
+		Where(
+			paymentattempt.ID(id),
+			paymentattempt.TenantID(types.GetTenantID(ctx)),
+			paymentattempt.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHint("Payment attempt not found").
+				WithReportableDetails(map[string]interface{}{
+					"attempt_id": id,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get payment attempt").
+			WithReportableDetails(map[string]interface{}{
+				"attempt_id": id,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	return domainPayment.FromEntAttempt(a), nil
+}
+
+func (r *paymentRepository) UpdateAttempt(ctx context.Context, a *domainPayment.PaymentAttempt) error {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "update_attempt", map[string]interface{}{
+		"attempt_id": a.ID,
+		"payment_id": a.PaymentID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+
+	r.log.Debug(ctx, "updating payment attempt",
+		"attempt_id", a.ID,
+		"payment_id", a.PaymentID,
+		"status", a.Status,
+		"payment_status", a.PaymentStatus,
+	)
+
+	_, err := client.PaymentAttempt.Update().
+		Where(
+			paymentattempt.EnvironmentID(types.GetEnvironmentID(ctx)),
+			paymentattempt.ID(a.ID),
+			paymentattempt.TenantID(a.TenantID),
+		).
+		SetPaymentStatus(string(a.PaymentStatus)).
+		SetStatus(string(a.Status)).
+		SetNillableGatewayAttemptID(a.GatewayAttemptID).
+		SetNillableErrorMessage(a.ErrorMessage).
+		SetMetadata(a.Metadata).
+		SetUpdatedAt(time.Now().UTC()).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithHint("Payment attempt not found").
+				WithReportableDetails(map[string]interface{}{
+					"attempt_id": a.ID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithHint("Failed to update payment attempt").
+			WithReportableDetails(map[string]interface{}{
+				"attempt_id": a.ID,
+				"payment_id": a.PaymentID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	r.DeleteCache(ctx, a.ID)
+	return nil
+}
+
+func (r *paymentRepository) ListAttempts(ctx context.Context, paymentID string) ([]*domainPayment.PaymentAttempt, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "list_attempts", map[string]interface{}{
+		"payment_id": paymentID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+
+	r.log.Debug(ctx, "listing payment attempts",
+		"payment_id", paymentID,
+	)
+
+	attempts, err := client.PaymentAttempt.Query().
+		Where(
+			paymentattempt.PaymentID(paymentID),
+			paymentattempt.TenantID(types.GetTenantID(ctx)),
+			paymentattempt.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		Order(ent.Asc(paymentattempt.FieldAttemptNumber)).
+		All(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithHint("Failed to list payment attempts").
+			WithReportableDetails(map[string]interface{}{
+				"payment_id": paymentID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	return domainPayment.FromEntAttemptList(attempts), nil
+}
+
+func (r *paymentRepository) GetLatestAttempt(ctx context.Context, paymentID string) (*domainPayment.PaymentAttempt, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "payment", "get_latest_attempt", map[string]interface{}{
+		"payment_id": paymentID,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+
+	r.log.Debug(ctx, "getting latest payment attempt",
+		"payment_id", paymentID,
+	)
+
+	a, err := client.PaymentAttempt.Query().
+		Where(
+			paymentattempt.EnvironmentID(types.GetEnvironmentID(ctx)),
+			paymentattempt.PaymentID(paymentID),
+			paymentattempt.TenantID(types.GetTenantID(ctx)),
+		).
+		Order(ent.Desc(paymentattempt.FieldAttemptNumber)).
+		First(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithHint("Payment attempt not found").
+				WithReportableDetails(map[string]interface{}{
+					"payment_id": paymentID,
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithHint("Failed to get latest payment attempt").
+			WithReportableDetails(map[string]interface{}{
+				"payment_id": paymentID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	return domainPayment.FromEntAttempt(a), nil
+}
+
+// PaymentQuery type alias for better readability
+type PaymentQuery = *ent.PaymentQuery
+
+// PaymentQueryOptions implements BaseQueryOptions for payment queries
+type PaymentQueryOptions struct{}
+
+func (o PaymentQueryOptions) ApplyTenantFilter(ctx context.Context, query PaymentQuery) PaymentQuery {
+	return query.Where(payment.TenantID(types.GetTenantID(ctx)))
+}
+
+func (o PaymentQueryOptions) ApplyEnvironmentFilter(ctx context.Context, query PaymentQuery) PaymentQuery {
+	environmentID := types.GetEnvironmentID(ctx)
+	if environmentID != "" {
+		return query.Where(payment.EnvironmentID(environmentID))
+	}
+	return query
+}
+
+func (o PaymentQueryOptions) ApplyStatusFilter(query PaymentQuery, status string) PaymentQuery {
+	if status == "" {
+		return query.Where(payment.StatusEQ(string(types.StatusPublished)))
+	}
+	return query.Where(payment.Status(status))
+}
+
+func (o PaymentQueryOptions) ApplySortFilter(query PaymentQuery, field string, order string) PaymentQuery {
+	orderFunc := ent.Desc
+	if order == "asc" {
+		orderFunc = ent.Asc
+	}
+	return query.Order(orderFunc(o.GetFieldName(field)))
+}
+
+func (o PaymentQueryOptions) ApplyPaginationFilter(query PaymentQuery, limit int, offset int) PaymentQuery {
+	query = query.Limit(limit)
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	return query
+}
+
+// GetFieldName returns the ent field name for payment; delegates to ent's ValidColumn so new schema fields are supported automatically.
+func (o PaymentQueryOptions) GetFieldName(field string) string {
+	if payment.ValidColumn(field) {
+		return field
+	}
+	return ""
+}
+
+func (o PaymentQueryOptions) applyEntityQueryOptions(_ context.Context, f *types.PaymentFilter, query PaymentQuery) PaymentQuery {
+	if f == nil {
+		return query
+	}
+
+	// Apply payment IDs filter if specified
+	if len(f.PaymentIDs) > 0 {
+		query = query.Where(payment.IDIn(f.PaymentIDs...))
+	}
+
+	// Apply destination type filter if specified
+	if f.DestinationType != nil {
+		query = query.Where(payment.DestinationType(*f.DestinationType))
+	}
+
+	// Apply destination ID filter if specified
+	if f.DestinationID != nil {
+		query = query.Where(payment.DestinationID(*f.DestinationID))
+	}
+
+	// Apply payment method type filter if specified
+	if f.PaymentMethodType != nil {
+		query = query.Where(payment.PaymentMethodType(*f.PaymentMethodType))
+	}
+
+	// Apply payment status filter if specified
+	if f.PaymentStatus != nil {
+		query = query.Where(payment.PaymentStatus(*f.PaymentStatus))
+	}
+
+	// Apply payment gateway filter if specified
+	if f.PaymentGateway != nil {
+		query = query.Where(payment.PaymentGateway(*f.PaymentGateway))
+	}
+
+	// Apply currency filter if specified
+	if f.Currency != nil {
+		query = query.Where(payment.Currency(*f.Currency))
+	}
+
+	// Apply gateway payment ID filter if specified
+	if f.GatewayPaymentID != nil {
+		query = query.Where(payment.GatewayPaymentID(*f.GatewayPaymentID))
+	}
+
+	// Apply gateway tracking ID filter if specified
+	if f.GatewayTrackingID != nil {
+		query = query.Where(payment.GatewayTrackingID(*f.GatewayTrackingID))
+	}
+
+	// Apply time range filters if specified
+	if f.TimeRangeFilter != nil {
+		if f.TimeRangeFilter.StartTime != nil {
+			query = query.Where(payment.CreatedAtGTE(*f.TimeRangeFilter.StartTime))
+		}
+		if f.TimeRangeFilter.EndTime != nil {
+			query = query.Where(payment.CreatedAtLTE(*f.TimeRangeFilter.EndTime))
+		}
+	}
+
+	return query
+}
+
+func (r *paymentRepository) SetCache(ctx context.Context, payment *domainPayment.Payment) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "payment", "set", map[string]interface{}{
+		"payment_id": payment.ID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPayment, payment.ID)
+	r.redisCache.Set(ctx, cacheKey, payment, cache.ExpiryDefaultRedis)
+}
+
+func (r *paymentRepository) GetCache(ctx context.Context, id string) *domainPayment.Payment {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "payment", "get", map[string]interface{}{
+		"payment_id": id,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPayment, id)
+	value, found := r.redisCache.Get(ctx, cacheKey)
+	if !found {
+		return nil
+	}
+	p, ok := cache.UnmarshalCacheValue[domainPayment.Payment](value)
+	if !ok {
+		return nil
+	}
+	return p
+}
+
+func (r *paymentRepository) DeleteCache(ctx context.Context, paymentID string) {
+	span, ctx := cache.StartRedisCacheSpan(ctx, "payment", "delete", map[string]interface{}{
+		"payment_id": paymentID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixPayment, paymentID)
+	r.redisCache.Delete(ctx, cacheKey)
+}

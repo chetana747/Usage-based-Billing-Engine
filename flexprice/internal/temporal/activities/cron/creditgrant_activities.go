@@ -1,0 +1,48 @@
+package cron
+
+import (
+	"context"
+
+	"github.com/flexprice/flexprice/internal/ee/service"
+	"github.com/flexprice/flexprice/internal/logger"
+	cronModels "github.com/flexprice/flexprice/internal/temporal/models"
+	"go.temporal.io/sdk/activity"
+)
+
+// CreditGrantActivities wraps credit-grant cron logic as Temporal activities.
+type CreditGrantActivities struct {
+	creditGrantService service.CreditGrantService
+	logger             *logger.Logger
+}
+
+// NewCreditGrantActivities builds credit-grant cron activities.
+func NewCreditGrantActivities(creditGrantService service.CreditGrantService, log *logger.Logger) *CreditGrantActivities {
+	return &CreditGrantActivities{creditGrantService: creditGrantService, logger: log}
+}
+
+// ProcessScheduledCreditGrantApplicationsActivity processes all scheduled credit grant applications.
+func (a *CreditGrantActivities) ProcessScheduledCreditGrantApplicationsActivity(ctx context.Context) (*cronModels.CreditGrantProcessingWorkflowResult, error) {
+	log := activity.GetLogger(ctx)
+	log.Info("Processing scheduled credit grant applications")
+
+	resp, err := a.creditGrantService.ProcessScheduledCreditGrantApplications(ctx)
+	if err != nil {
+		a.logger.Error(ctx, "ProcessScheduledCreditGrantApplicationsActivity failed",
+			"error", err,
+		)
+		return nil, err
+	}
+
+	result := &cronModels.CreditGrantProcessingWorkflowResult{
+		Processed: resp.TotalApplicationsCount,
+		Succeeded: resp.SuccessApplicationsCount,
+		Failed:    resp.FailedApplicationsCount,
+	}
+
+	log.Info("Completed credit grant processing",
+		"processed", result.Processed,
+		"succeeded", result.Succeeded,
+		"failed", result.Failed,
+	)
+	return result, nil
+}

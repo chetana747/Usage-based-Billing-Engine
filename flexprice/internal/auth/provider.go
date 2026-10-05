@@ -1,0 +1,104 @@
+package auth
+
+import (
+	"context"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/config"
+	"github.com/flexprice/flexprice/internal/domain/auth"
+	"github.com/flexprice/flexprice/internal/types"
+)
+
+// AuthRequest we create this by first checking the email in the DB and if found we
+// set the user and tenant id and then with this request we try to validate the saved
+// provider token with the user provided input and get the auth token
+type AuthRequest struct {
+	UserID   string
+	TenantID string
+	Email    string
+	Password string
+	Token    string
+}
+
+type AuthResponse struct {
+	// ProviderToken is the fixed identifier or code provided by the provider
+	// for example, in Supabase, it's the user ID and for Flexprice, it's the hashed password
+	ProviderToken string
+	// AuthToken is the token used to authenticate with the application or the generated
+	// jwt token for the user
+	AuthToken string
+	// ID is the ID of the user
+	ID string
+}
+
+// UserInviteRequest is used to create/invite a user in the configured auth provider.
+// This flow provisions a user identity and sets the initial password (no auth token issuance).
+type UserInviteRequest struct {
+	Email string
+}
+
+type UserInviteResponse struct {
+	// ID is the provider user ID (or generated user ID for Flexprice).
+	ID string
+	// Password is the generated initial password for the user (returned so it can be shown once).
+	Password string
+	// AuthRecord is optional provider-specific auth material that must be persisted server-side.
+	// For Flexprice this contains the bcrypt hash; for Supabase it will be nil.
+	AuthRecord *auth.Auth
+}
+
+// EmailConfirmChecker is implemented by providers that can report, from their
+// own records rather than from a token, whether a user's email is confirmed.
+//
+// Kept separate from Provider because only Supabase has this notion: the
+// flexprice and SSO providers have no equivalent server-side state, and adding
+// it to Provider would force them to implement a method that could only ever
+// return a meaningless value.
+type EmailConfirmChecker interface {
+	EmailConfirmed(ctx context.Context, userID string) (bool, error)
+}
+
+type Provider interface {
+
+	// User Management
+	GetProvider() types.AuthProvider
+	UserInvite(ctx context.Context, req UserInviteRequest) (*UserInviteResponse, error)
+	SignUp(ctx context.Context, req AuthRequest) (*AuthResponse, error)
+	Login(ctx context.Context, req AuthRequest, userAuthInfo *auth.Auth) (*AuthResponse, error)
+	ValidateToken(ctx context.Context, token string) (*auth.Claims, error)
+	AssignUserToTenant(ctx context.Context, userID string, tenantID string) error
+
+	// RemoveUser permanently deletes the user's identity from the auth provider.
+	RemoveUser(ctx context.Context, userID string) error
+
+	// Customer Dashboard Token Management
+	GenerateSessionToken(customerID, externalCustomerID, tenantID, environmentID string, timeoutHours int) (string, time.Time, error)
+	ValidateSessionToken(ctx context.Context, token string) (*auth.SessionClaims, error)
+
+	// GenerateDevToken creates a short-lived JWT for internal developer testing.
+	// The claim schema is provider-specific:
+	//   flexprice → { user_id, tenant_id, environment_id }   (email ignored)
+	//   supabase  → { sub, email, app_metadata.tenant_id, environment_id }
+	GenerateDevToken(tenantID, environmentID, userID, email string, expiryHours int) (string, time.Time, error)
+
+	// GenerateCheckoutToken creates a short-lived JWT for frontend payment checkout flows.
+	// The token carries provider-specific claims (e.g. publishable_key, flexprice_payment_id)
+	// and is decoded client-side by the checkout page. Both providers sign with HS256.
+	GenerateCheckoutToken(extraClaims map[string]interface{}) (string, error)
+}
+
+func NewProvider(cfg *config.Configuration) Provider {
+	switch cfg.Auth.Provider {
+	case types.AuthProviderSupabase:
+		return NewSupabaseAuth(cfg)
+	case types.AuthProviderSAML:
+		// Nil when the enterprise SAML package is not linked in; an
+		// unconfigured deployment then behaves as it did before.
+		if samlProviderFactory != nil {
+			return samlProviderFactory(cfg)
+		}
+		return NewFlexpriceAuth(cfg)
+	default:
+		return NewFlexpriceAuth(cfg)
+	}
+}

@@ -1,0 +1,625 @@
+deployment:
+  mode: "local" # "local", "docker", "production"
+
+server:
+  address: ":8080"
+  # Grace period for in-flight requests after SIGTERM. Clamped to 45s.
+  shutdown_timeout: 25s
+
+auth:
+  provider: "flexprice" # "flexprice" or "supabase"
+  secret: "super_secret"
+  # SAML single sign-on. Per-tenant identity provider details live in the
+  # tenant's saml_config setting, not here.
+  saml:
+    # Deployment-wide switch for the whole feature. Off means the SAML routes
+    # are not mounted and no tenant may store a configuration.
+    #
+    # This is the only SAML policy that is set here. Everything about how a
+    # tenant authenticates — its identity provider, whether SSO is on, whether
+    # password login is refused — lives in that tenant's saml_config setting.
+    enabled: false
+    # This deployment's own origin (scheme and host); the SAML paths are built
+    # onto it. Not per-tenant: one deployment has one API origin, and the tenant
+    # appears in the path rather than the origin. It must not be taken from the
+    # request, because it is signed into the AuthnRequest as the ACS URL.
+    base_url: "http://localhost:8080"
+    # This deployment's frontend, where the browser lands after a successful
+    # assertion, carrying the token.
+    dashboard_url: "http://localhost:3000/auth/callback"
+  supabase:
+    base_url: "http://localhost:54321"
+    service_key: "<supabase service key>"
+  api_key:
+    header: "x-api-key"
+    keys:
+      "0cfd568f22158887f8b77bc019fb245b1f14077b80936342b052985efa7de46c":
+        tenant_id: "00000000-0000-0000-0000-000000000000"
+        user_id: "00000000-0000-0000-0000-000000000000"
+        name: "Local Dev API Key"
+        is_active: true
+
+# Fire-and-forget analytics meter_usage feed to Kafka after ClickHouse write.
+analytics:
+  enabled: false # FLEXPRICE_ANALYTICS_ENABLED
+  # FLEXPRICE_ANALYTICS_METER_USAGE_SINK_TOPIC. Future: .sink.backfill / .sink.lazy
+  meter_usage_sink_topic: "analytics.meter_usage.sink.realtime"
+  # Periodic Temporal revenue_facts dirty-rollup (RevenueRollupWorkflow). Off by
+  # default — enable only once revenue_facts is trusted enough to run unattended.
+  revenue_rollup:
+    enabled: false # FLEXPRICE_ANALYTICS_REVENUE_ROLLUP_ENABLED
+    auto_correct: false # FLEXPRICE_ANALYTICS_REVENUE_ROLLUP_AUTO_CORRECT
+
+kafka:
+  brokers: "localhost:29092" # For local mode
+  # Will be overridden by FLEXPRICE_KAFKA_BROKERS env var in Docker
+  consumer_group: "flexprice-consumer-local"
+  topic: "staging_events"
+  topic_lazy: "staging_events_lazy"
+  topic_bulk: "staging_events_bulk"
+  # Batching bounds for the bulk publish path; whichever is hit first closes the batch.
+  # Keep bulk_max_batch_bytes under the topic's max.message.bytes (1 MB default on MSK).
+  bulk_max_batch_size: 200
+  bulk_max_batch_bytes: 524288
+  topic_dlq: "staging_events_dlq"
+  # Keep this at least as long as the broker's offsets.retention.minutes.
+  # Set to 0s to defer to the broker.
+  offset_retention: 168h
+  tls: false
+  # Path to a PEM CA bundle for verifying the broker cert. Empty = OS trust
+  # store (correct for MSK / Confluent Cloud). Set only for a private or
+  # self-signed broker CA. PEM only — a JKS truststore must be exported first:
+  #   keytool -exportcert -alias <alias> -keystore truststore.jks -rfc -file ca.pem
+  tls_ca_cert_file: ""
+  # Overrides the hostname the broker cert is verified against. Empty verifies
+  # against the dial address (the advertised listener), which is almost always
+  # right. Set only when the cert SAN does not match it — e.g. a broker behind
+  # an SNI-mismatched load balancer.
+  tls_server_name: ""
+  use_sasl: false
+  sasl_mechanism: ""
+  sasl_user: ""
+  sasl_password: ""
+  client_id: "flexprice-client-local"
+  route_tenants_on_lazy_mode: []
+  # topics_defaults/topics below describe the full desired topic set for
+  # `migrate kafka` (cmd/migrate) only (server/consumer/worker ignore them). Base/dev
+  # names, unprefixed — mirrors the 9 staging GMK topics. A shared prod
+  # cluster MUST set FLEXPRICE_KAFKA_TOPICS (JSON, same shape) which FULLY
+  # REPLACES this block (no merge) with prod_* prefixed names + tuned sizing.
+  # See internal/kafka/topicspec and topics.example.json.
+  topics_defaults:
+    replication_factor: 3
+    retention_ms: 604800000 # 7d
+  topics:
+    events:
+      partitions: 6
+    events_lazy:
+      partitions: 6
+    events_dlq:
+      partitions: 3
+    events_backfill:
+      partitions: 6
+    events_bulk:
+      partitions: 6
+    events_post_processing:
+      partitions: 6
+    events_post_processing_backfill:
+      partitions: 6
+    system_events:
+      partitions: 3
+    wallet_alert:
+      partitions: 3
+    onboarding_events:
+      partitions: 3
+    # Must stay in sync with analytics.meter_usage_sink_topic above.
+    "analytics.meter_usage.sink.realtime":
+      partitions: 6
+
+# Optional SECOND Kafka cluster for the AWS→GCP migration (GCP-CUTOVER-STEPWISE.md).
+# `kafka` above = this deployment's own/local cluster (consumed AND always written).
+# `kafka_secondary` below = the other cloud's cluster. Dual-write is PRESENCE-BASED:
+#   single cluster (today):  kafka_secondary absent  -> writes local only
+#   dual-write (migration):  kafka_secondary set     -> writes local + secondary
+# Writes are independent (one failing does not block the other). Consumers/webhooks/DLQ
+# always read the local `kafka` cluster. Per deployment:
+#   AWS box: kafka=MSK, kafka_secondary=GMK ;  GCP box: kafka=GMK, kafka_secondary=MSK.
+# Set via FLEXPRICE_KAFKA_SECONDARY_* env. kafka_secondary mirrors the kafka block:
+# kafka_secondary:
+#   brokers: ""
+#   consumer_group: "flexprice-consumer"
+#   topic: "events"
+#   topic_lazy: "events_lazy"
+#   topic_dlq: "events_dlq"
+#   offset_retention: 168h
+#   tls: true
+#   use_sasl: true
+#   sasl_mechanism: "OAUTHBEARER"
+#   sasl_oauth_scopes: []   # defaults to https://www.googleapis.com/auth/cloud-platform
+#   client_id: "flexprice-client"
+#   route_tenants_on_lazy_mode: []
+
+clickhouse:
+  address: 127.0.0.1:9000 # For local mode
+  # Will be overridden by FLEXPRICE_CLICKHOUSE_ADDRESS env var in Docker
+  tls: false
+  # Wire protocol: native (default) or http. The address port must match the
+  # protocol — native listens on 9000 (9440 with TLS), http on 8123 (8443 with
+  # TLS). A native client pointed at an HTTP port fails at connect with
+  # "[handshake] unexpected packet [72] from server". Use http when ClickHouse is
+  # only reachable via an HTTPS endpoint, e.g. behind a TLS-terminating LB.
+  protocol: native
+  username: flexprice
+  password: flexprice123
+  database: flexprice
+  max_memory_usage: 50
+  # Per-process connection pool (0 would fall back to clickhouse-go's defaults: idle 5,
+  # open idle+5 = 10 — a hidden 10-query cap per pod/task that bottlenecks event ingest,
+  # since consumers doing one INSERT per event are bounded by max_open_conns / insert latency).
+  # max_idle_conns stays lower than max_open_conns so the pool bursts under load and releases
+  # when idle: 100 idle x N pods would otherwise hold a permanent connection floor server-side.
+  # Sizing check before raising further: FLEET tasks x max_open_conns must stay under the
+  # server's max_connections (4096 on ClickHouse Cloud), and only helps while the server has
+  # spare admission (system.metrics Query vs max_concurrent_queries).
+  max_open_conns: 100
+  max_idle_conns: 20
+  # dial_timeout also bounds the pool-acquire wait inside the driver; read_timeout bounds
+  # a running query. 0 = built-in defaults (10s / 30s).
+  dial_timeout: 0s
+  read_timeout: 0s
+
+postgres:
+  host: 127.0.0.1 # For local mode
+  # Will be overridden by FLEXPRICE_POSTGRES_HOST env var in Docker
+  port: 5432
+  reader_host: "" # empty = use writer host; set FLEXPRICE_POSTGRES_READER_HOST to override
+  reader_port: 0 # 0 = use writer port
+  user: flexprice
+  password: flexprice123
+  dbname: flexprice
+  sslmode: disable
+  max_open_conns: 10
+  max_idle_conns: 5
+  conn_max_lifetime_minutes: 60
+
+# Redis configuration
+redis:
+  host: "localhost" # Redis server hostname
+  port: 6379 # Redis server port
+  username: "" # Redis data-node ACL user (optional); FLEXPRICE_REDIS_USERNAME
+  password: "" # Redis password (optional)
+  db: 0 # Redis database number
+  use_tls: false # Use TLS for Redis connection
+  tls_server_name: "" # Verify server cert against this hostname (set to cert SAN for ElastiCache wildcard certs)
+  tls_skip_verify: true # Defaults true for ElastiCache; set false + tls_server_name to verify
+  pool_size: 10 # Maximum number of connections in the pool
+  timeout: 5s # Timeout for Redis operations
+  key_prefix: "flexprice:local"
+  # cluster_mode preserves the pre-existing hardcoded behaviour (the client
+  # was always *redis.ClusterClient). Set to false when targeting a single-node
+  # Redis (in-cluster bitnami/redis chart, single-node ElastiCache).
+  cluster_mode: true
+  # Sentinel HA: set sentinel_master_name to enable (ignores host/port/cluster_mode).
+  sentinel_master_name: "" # e.g. "mymaster"; FLEXPRICE_REDIS_SENTINEL_MASTER_NAME
+  sentinel_addrs: [] # sentinel endpoints host:port, NOT the master; FLEXPRICE_REDIS_SENTINEL_ADDRS (comma-separated)
+  sentinel_username: "" # sentinel auth, optional; FLEXPRICE_REDIS_SENTINEL_USERNAME
+  sentinel_password: "" # sentinel auth, optional; FLEXPRICE_REDIS_SENTINEL_PASSWORD
+  route_reads_to_replicas: false # reads to lowest-latency master/replica (NOT sharding); FLEXPRICE_REDIS_ROUTE_READS_TO_REPLICAS
+
+# Unified OpenTelemetry exporter — traces and logs share the same SigNoz
+# Cloud backend via OTLP/gRPC. Each signal can override the top-level defaults.
+#
+# Production env vars to set in ECS task definition (per-service):
+#   FLEXPRICE_OTEL_ENABLED=true
+#   FLEXPRICE_OTEL_SERVICE_NAME=flexprice-api   # or flexprice-consumer / flexprice-temporal-worker
+#   ENVIRONMENT=production                       # maps to deployment.environment resource attr
+#
+#   FLEXPRICE_OTEL_TRACES_ENABLED=true
+#   FLEXPRICE_OTEL_TRACES_ENDPOINT=ingest.in2.signoz.cloud:443
+#   FLEXPRICE_OTEL_TRACES_AUTH_HEADER=signoz-ingestion-key
+#   FLEXPRICE_OTEL_TRACES_AUTH_VALUE=<signoz-ingestion-key>
+#
+#   FLEXPRICE_OTEL_LOGS_ENABLED=true
+#   FLEXPRICE_OTEL_LOGS_ENDPOINT=ingest.in2.signoz.cloud:443
+#   FLEXPRICE_OTEL_LOGS_AUTH_HEADER=signoz-ingestion-key
+#   FLEXPRICE_OTEL_LOGS_AUTH_VALUE=<signoz-ingestion-key>
+#
+# Protocol defaults to "grpc" (top-level) — no per-signal override needed for SigNoz.
+# Set FLEXPRICE_OTEL_INSECURE=false (default) for TLS to SigNoz Cloud.
+otel:
+  enabled: true
+  service_name: ""
+  protocol: "grpc" # SigNoz Cloud uses gRPC/TLS — do not change
+  insecure: false # false = TLS (required for SigNoz Cloud)
+
+  traces:
+    enabled: false
+    endpoint: "" # Set via FLEXPRICE_OTEL_TRACES_ENDPOINT (e.g. ingest.in2.signoz.cloud:443)
+    protocol: "" # Empty = inherit top-level grpc. Override only for HTTP backends.
+    auth_header: "signoz-ingestion-key" # Set auth_value via FLEXPRICE_OTEL_TRACES_AUTH_VALUE
+    auth_value: ""
+    sample_rate: 1.0
+    # Per-query DB/cache/ClickHouse child spans. Off by default; when on, throttled
+    # per-trace by storage_spans_sample_rate (independent of sample_rate, so server
+    # spans stay 100%). 0.2 caps the fan-out; set 1.0 for full debug fidelity.
+    storage_spans_enabled: false
+    storage_spans_sample_rate: 0.2
+    # Cache spans get a per-type opt-in on top of storage_spans_enabled — they
+    # fire on every get/set/delete on hot paths, so operators may want DB/CH
+    # spans without the cache fan-out. Both default false and both also
+    # require storage_spans_enabled=true (that stays the master kill switch).
+    redis_cache_spans_enabled: false
+    in_memory_cache_spans_enabled: false
+    # Record errors/panics as OTel "exception" span events (SigNoz Exceptions tab).
+    # Replaces Sentry. Keep sample_rate at 1.0 so error traces aren't sampled away.
+    capture_exceptions: true
+
+  logs:
+    enabled: false
+    endpoint: "" # Set via FLEXPRICE_OTEL_LOGS_ENDPOINT (e.g. ingest.in2.signoz.cloud:443)
+    protocol: "" # Empty = inherit top-level grpc.
+    auth_header: "signoz-ingestion-key" # Set auth_value via FLEXPRICE_OTEL_LOGS_AUTH_VALUE
+    auth_value: ""
+
+  # App-level metrics (always-on aggregate signal, unsampled). Service-level
+  # resource only (no per-pod host attrs) to keep metric cardinality — and cost — flat.
+  metrics:
+    enabled: false
+    endpoint: "" # Set via FLEXPRICE_OTEL_METRICS_ENDPOINT
+    protocol: "" # Empty = inherit top-level grpc.
+    auth_header: "signoz-ingestion-key" # Set auth_value via FLEXPRICE_OTEL_METRICS_AUTH_VALUE
+    auth_value: ""
+    interval_seconds: 60
+    temporal_enabled: false
+    # Keep http.server.request.duration (request rate / latency / error rate per
+    # route). Off here — SigNoz derives it from traces; turn it on where the
+    # backend cannot store traces.
+    http_server_enabled: false
+
+pyroscope:
+  enabled: false # Set to true to enable continuous profiling
+  server_address: "http://localhost:4040" # Pyroscope server URL or Grafana Cloud Profiles URL
+  application_name: "flexprice" # Your application name
+  basic_auth_user: "" # For Grafana Cloud (your stack user)
+  basic_auth_password: "" # For Grafana Cloud (your API key)
+  sample_rate: 100 # Sample rate in Hz (100 = 100 samples per second)
+  disable_gc_runs: false # Set to true if experiencing high CPU usage from GC
+
+event:
+  publish_destination: "kafka"
+  # Batched publishing for POST /v1/events/bulk (kafka.topic_bulk). Off by default: batched
+  # events bypass the `events` consumers, so enable only where a bulk consumer runs.
+  bulk_publish_enabled: false
+
+dynamodb:
+  in_use: false
+  region: "us-east-1"
+  event_table_name: "events"
+
+logging:
+  level: "debug"
+  db_level: "error"
+  # Service identity — override via SERVICE_NAME and ENVIRONMENT env vars
+  service_name: "" # e.g., "flexprice-api"
+  environment: "" # e.g., "production", "staging"
+  # DEPRECATED: configure OTLP log export under `otel.logs.*` (top of file).
+  # The following keys are still read for back-compat and will be removed in a
+  # future release. otel_debug below is still honored for legacy debug runs.
+  # otel_enabled: false
+  # otel_endpoint: ""
+  # otel_protocol: "grpc"
+  # otel_insecure: false
+  # otel_auth_header: ""
+  # otel_auth_value: ""
+  otel_debug: false # synchronous SimpleProcessor for log export; use to confirm delivery
+
+webhook:
+  enabled: true
+  event_cascading_enabled: true
+  topic: "flexprice_system_events"
+  consumer_group: "system-events-consumer"
+  rate_limit: 5
+  max_retries: 3
+  initial_interval: 1s
+  max_interval: 10s
+  multiplier: 2.0
+  max_elapsed_time: 2m
+  tenants:
+    "tenant_01JJ20ZF9M5GQQXJG2AQSMZCVM":
+      enabled: true
+      endpoint: "http://localhost:8080/health"
+      headers:
+        "X-Api-Key": "api-key-provided-by-tenant"
+      excluded_events:
+        - "tenant.created"
+        - "tenant.updated"
+  svix_config:
+    enabled: false
+    auth_token: "svix_auth_token"
+    base_url: "https://api.us.svix.com"
+
+webhook_retry_job:
+  enabled: true
+  max_attempts: 5
+  rate_limit: 5
+  excluded_tenants: []
+  allowed_event_types: []
+
+temporal:
+  address: "127.0.0.1:7233" # For local mode
+  # Will be overridden by TEMPORAL_ADDRESS env var in Docker
+  tls: false
+  namespace: "default"
+  task_queue: "billing-task-queue"
+  api_key: "strong api key"
+  api_key_name: "secret name"
+  max_workflows_per_cron_run: 500 # Max child workflows per cron cycle; 0 = unlimited
+  client_name: "flexprice-client"
+  retry:
+    initial_interval_seconds: 1
+    max_interval_seconds: 10
+    max_attempts: 3
+    backoff_coefficient: 2.0
+  worker:
+    max_concurrent_activity_execution_size: 10 # Max activities running concurrently per worker (default: 10)
+    max_concurrent_workflow_task_execution_size: 10 # Max workflow tasks running concurrently per worker (default: 10)
+    worker_activities_per_second: 5 # Rate limit: activities dispatched per second per worker (default: 5, 0=unlimited)
+    task_queue_activities_per_second: 0 # Rate limit: activities per second across ALL workers for a task queue (default: 0=unlimited)
+  connection:
+    dial_timeout_seconds: 5
+    retry_max_attempts: 5
+    retry_initial_interval_seconds: 1
+    retry_max_interval_seconds: 10
+    retry_backoff_coefficient: 1.5
+
+secrets:
+  encryption_key: "super-secret-encryption-key"
+
+billing:
+  tenant_id: ""
+  environment_id: ""
+
+s3:
+  enabled: false
+  region: "ap-south-1"
+  invoice:
+    bucket: "flexprice-invoices"
+    presign_expiry_duration: "1h"
+    key_prefix: ""
+
+storage:
+  # provider: "" auto-detects via CloudDetector (GCP metadata -> gcs, AWS metadata -> s3).
+  # Set explicitly ("s3" or "gcs") to override detection.
+  provider: ""
+
+gcs:
+  enabled: false
+  invoice:
+    bucket: "" # Set via FLEXPRICE_GCS_INVOICE_BUCKET env var
+    presign_expiry_duration: "1h"
+    key_prefix: ""
+  # Identity used to sign presigned invoice PDF links. Ambient Workload Identity
+  # credentials cannot self-sign, so this must name a service account the workload
+  # may impersonate (roles/iam.serviceAccountTokenCreator). Required when the
+  # resolved storage provider is GCS — without it PDFs upload but every download
+  # link fails.
+  signer_service_account_email: "" # Set via FLEXPRICE_GCS_SIGNER_SERVICE_ACCOUNT_EMAIL
+
+flexprice_s3_exports:
+  bucket: "" # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_BUCKET env var
+  region: "ap-south-1"
+  aws_access_key_id: "" # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_AWS_ACCESS_KEY_ID env var (optional if federation_role_arn is set)
+  aws_secret_access_key: "" # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_AWS_SECRET_ACCESS_KEY env var (optional if federation_role_arn is set)
+  aws_session_token: "" # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_AWS_SESSION_TOKEN env var
+  federation_enabled: false # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_FEDERATION_ENABLED — GKE->AWS OIDC federation (see infrastructure repo s3-federation module)
+  federation_role_arn: "" # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_FEDERATION_ROLE_ARN
+  # credential_source: "" # Set via FLEXPRICE_FLEXPRICE_S3_EXPORTS_CREDENTIAL_SOURCE — one of
+  # "static" (use aws_access_key_id/aws_secret_access_key), "ambient" (EKS IRSA / EKS Pod
+  # Identity / ECS task role / EC2 instance profile — all resolved via the AWS default
+  # credential chain, no per-mechanism config), or "federation" (GCP->AWS OIDC via
+  # federation_role_arn). Left empty, it is derived: federation_enabled=true -> "federation",
+  # both AWS keys set -> "static", otherwise -> "ambient".
+  # NOTE: a *derived* "ambient" is rejected by validation — to run ambient you must set
+  # credential_source: "ambient" explicitly (this preserves the historic "no credential
+  # source configured" error for an otherwise-empty config).
+
+# GCS counterpart of flexprice_s3_exports, used when the deployment runs on GCP.
+# Authentication is ambient Workload Identity — there is deliberately no service
+# account key setting (projects commonly enforce
+# constraints/iam.disableServiceAccountKeyCreation).
+flexprice_gcs_exports:
+  bucket: "" # Set via FLEXPRICE_FLEXPRICE_GCS_EXPORTS_BUCKET env var
+  # Identity used to sign presigned GET URLs. Ambient Workload Identity credentials
+  # cannot self-sign, so this must name a service account the workload may
+  # impersonate (roles/iam.serviceAccountTokenCreator). Empty disables presigning.
+  signer_service_account_email: "" # Set via FLEXPRICE_FLEXPRICE_GCS_EXPORTS_SIGNER_SERVICE_ACCOUNT_EMAIL
+
+# Flexprice-managed bucket that trusted upstream uploaders (CSV Box today)
+# write into. The /tasks import API accepts only an upload_id: the backend
+# recomposes the S3 key as <key_prefix>/<upload_id>_<tenant_id>__<env_id>.csv
+# using the tenant/env from the authenticated ctx, so a caller cannot address
+# any other tenant's uploads.
+#
+# CSV Box must be configured to name uploaded objects with
+# <upload_id>_<customer_id>.csv and to set customer_id = <tenant_id>__<env_id>
+# (double underscore). Set key_prefix to CSV Box's destination prefix, WITHOUT
+# a trailing slash — CSV Box appends its own separator.
+flexprice_s3_imports:
+  enabled: false # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_ENABLED
+  bucket: "" # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_BUCKET
+  region: "ap-south-1" # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_REGION
+  key_prefix: "csv-box-uplods" # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_KEY_PREFIX
+  aws_access_key_id: "" # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_AWS_ACCESS_KEY_ID
+  aws_secret_access_key: "" # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_AWS_SECRET_ACCESS_KEY
+  aws_session_token: "" # Set via FLEXPRICE_FLEXPRICE_S3_IMPORTS_AWS_SESSION_TOKEN
+
+# Flexprice's own AWS identity — the principal that assumes each tenant's marketplace IAM role.
+# This is the caller named in the tenant's trust policy, NOT the tenant's role (that lives per
+# connection). Required for the AWS Marketplace integration; leave unset to disable it.
+marketplace:
+  aws:
+    region: "" # Set via FLEXPRICE_MARKETPLACE_AWS_REGION env var
+    access_key_id: "" # Set via FLEXPRICE_MARKETPLACE_AWS_ACCESS_KEY_ID env var
+    secret_access_key: "" # Set via FLEXPRICE_MARKETPLACE_AWS_SECRET_ACCESS_KEY env var
+    # session_token only for temporary (ASIA...) keys; leave unset for a long-lived AKIA... key.
+    session_token: "" # Set via FLEXPRICE_MARKETPLACE_AWS_SESSION_TOKEN env var
+  # Not credentials — just the two values rendered into the GCP Marketplace WIF setup script we hand
+  # tenants. Authentication itself is ambient (the worker's own AWS IAM role); these only need to
+  # match that role so the script produces a WIF provider that trusts the right principal.
+  gcp:
+    flexprice_aws_account_id: "" # Set via FLEXPRICE_MARKETPLACE_GCP_FLEXPRICE_AWS_ACCOUNT_ID env var
+    flexprice_aws_role_name: "" # Set via FLEXPRICE_MARKETPLACE_GCP_FLEXPRICE_AWS_ROLE_NAME env var
+
+cache:
+  enabled: false
+  inmemory:
+    enabled: false
+  redis:
+    enabled: false
+
+event_processing:
+  enabled: true
+  topic: "events"
+  rate_limit: 12
+  consumer_group: "flexprice-consumer-local"
+  # Per-consumer-group dead-letter topic. Empty falls back to the legacy shared
+  # DLQ (kafka.topic_dlq) — messages are never dropped. Create the topic
+  # (or enable auto.create.topics.enable) before enabling in an environment.
+  topic_dlq: "event_processing_dlq"
+
+event_processing_lazy:
+  enabled: true
+  topic: "events_lazy"
+  rate_limit: 12
+  consumer_group: "v1_event_processing_lazy"
+  topic_dlq: "event_processing_lazy_dlq"
+
+event_processing_replay:
+  enabled: true
+  topic: "events_backfill"
+  rate_limit: 1
+  consumer_group: "v1_event_processing_replay"
+
+meter_usage_tracking:
+  enabled: true
+  topic: "events"
+  rate_limit: 1
+  consumer_group: "v1_meter_usage_tracking_service"
+  topic_dlq: "meter_usage_tracking_service_dlq"
+  redis_deduplication_enabled: false
+  rejected_event_webhook_enabled: false
+  rejected_event_webhook_window: "10m"
+
+meter_usage_tracking_lazy:
+  enabled: true
+  topic: "events_lazy"
+  rate_limit: 1
+  consumer_group: "v1_meter_usage_tracking_service_lazy"
+  topic_dlq: "meter_usage_tracking_service_lazy_dlq"
+
+# Usage-driven alert pipeline: meter-usage post-insert schedules a debounced
+# per-customer Temporal workflow (spend + entitlement grants + wallet alerts).
+usage_alerts:
+  enabled: false # meter usage pushes the debounce workflow
+  schedule_delay: "5m30s" # workflow StartDelay AND Redis schedule-throttle lock TTL
+  stale_after: "1h" # workflow runs firing later than this yield (ContinueAsNew); also activity ScheduleToStartTimeout
+  wallet_alerts_enabled: true
+  spend_alerts_enabled: true
+  entitlement_alerts_enabled: true
+  overrides: [] # [{tenant_id, environment_id, schedule_delay, stale_after}]
+
+wallet_balance_alert:
+  enabled: true
+  topic: "wallet_alert"
+  rate_limit: 1
+  consumer_group: "v1_wallet_alert_service"
+
+# Google Gemini (server-side AI pricing parse for dashboard). Set FLEXPRICE_GEMINI_API_KEY in secure environments.
+gemini:
+  api_key: ""
+  model: "gemini-2.5-flash-lite"
+
+whop:
+  base_url: "" # "https://sandbox-api.whop.com" - for sandbox whop testing
+
+email:
+  enabled: false # Set to true to enable email sending (override with FLEXPRICE_EMAIL_ENABLED=true)
+  resend_api_key: "" # Resend API key (set via FLEXPRICE_EMAIL_RESEND_API_KEY environment variable)
+  from_address: "" # Default from address for emails (MUST be verified in Resend)
+  reply_to: "" # Reply-to address for emails
+  calendar_url: "" # Calendar booking URL for onboarding
+  zapier_webhook_url: "" # Zapier webhook URL for user signup (set via FLEXPRICE_EMAIL_ZAPIER_WEBHOOK_URL environment variable)
+
+rbac:
+  roles_config_path: "internal/config/rbac/roles.json" # Path to the roles.json file
+
+# Generic OAuth configuration for multiple integration providers
+oauth:
+  # Base redirect URI - MUST be registered in each OAuth provider's app settings
+  # Development: http://localhost:3000/tools/integrations/oauth/callback
+  # Staging: https://admin-dev.flexprice.io/tools/integrations/oauth/callback
+  # Production: https://admin.flexprice.io/tools/integrations/oauth/callback
+  redirect_uri: "" 
+
+# Customer portal configuration
+customer_portal:
+  url: "http://localhost:3000"
+  token_timeout_hours: 1
+
+# Raw events reprocessing configuration
+raw_events_reprocessing:
+  enabled: true
+  output_topic: "prod_events_v4"
+
+# Raw event consumption configuration (batch processing from Bento)
+raw_event_consumption:
+  enabled: true
+  topic: "staging_events_backfill" # INPUT: Reads batches from here
+  output_topic: "staging_events" # OUTPUT: Publishes transformed events to here
+  rate_limit: 10
+  consumer_group: "v1_raw_event_processing_v4"
+
+# Bulk event consumers — read RawEventBatch messages published by
+# POST /events/bulk (identified via metadata batch_source=api_bulk) and
+# bulk-insert directly. Two parallel consumer groups on the same topic:
+# one writes to events, one extracts meter+qty and writes to meter_usage.
+# Reuses the raw_event_consumption topic; the metadata filter keeps Bento
+# batches on their own path (RawEventConsumptionService).
+bulk_event_consumption:
+  enabled: false
+  topic: "staging_events_bulk"
+  rate_limit: 10
+  consumer_group: "v1_bulk_event_consumption"
+  topic_dlq: "staging_events_bulk_dlq"
+
+bulk_meter_usage_tracking:
+  enabled: false
+  topic: "staging_events_bulk"
+  rate_limit: 10
+  consumer_group: "v1_bulk_meter_usage_tracking"
+  topic_dlq: "staging_meter_usage_tracking_bulk_dlq"
+  redis_deduplication_enabled: true
+  post_insert_side_effects_enabled: true
+
+integration_events:
+  enabled: true
+  consumer_group: "integration-events-consumer"
+  rate_limit: 10
+
+onboarding_events:
+  enabled: true
+  topic: "onboarding_events"
+  rate_limit: 10
+  consumer_group: "onboarding_events_consumer"
+  max_retries: 3
+
+# Checkout base URL for the checkout page
+checkout:
+  base_url: ""
+
+onboarding:
+  default_tenant_name: "Flexprice"
+
+chat_support:
+  app_id: ""
+  identity_secret: ""

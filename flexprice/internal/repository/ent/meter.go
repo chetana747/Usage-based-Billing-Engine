@@ -1,0 +1,520 @@
+package ent
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	"github.com/flexprice/flexprice/ent"
+	"github.com/flexprice/flexprice/ent/meter"
+	"github.com/flexprice/flexprice/internal/cache"
+	domainMeter "github.com/flexprice/flexprice/internal/domain/meter"
+	ierr "github.com/flexprice/flexprice/internal/errors"
+	"github.com/flexprice/flexprice/internal/logger"
+	"github.com/flexprice/flexprice/internal/postgres"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
+)
+
+// matching meters by event name is a hot path for the single-event and bulk consumers.
+// the in-memory cache is used to avoid hitting the database for repeat lookups.
+const matchingMetersByEventNameCacheTTL = 10 * time.Minute
+
+type meterRepository struct {
+	client    postgres.IClient
+	logger    *logger.Logger
+	queryOpts MeterQueryOptions
+	cache     cache.InMemoryCache
+}
+
+func NewMeterRepository(client postgres.IClient, logger *logger.Logger, cache cache.InMemoryCache) domainMeter.Repository {
+	return &meterRepository{
+		client:    client,
+		logger:    logger,
+		queryOpts: MeterQueryOptions{},
+		cache:     cache,
+	}
+}
+
+func (r *meterRepository) CreateMeter(ctx context.Context, m *domainMeter.Meter) error {
+	m.EventName = strings.TrimSpace(m.EventName)
+
+	client := r.client.Writer(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "meter", "create", map[string]interface{}{
+		"meter_id":   m.ID,
+		"event_name": m.EventName,
+	})
+	defer FinishSpan(span)
+
+	// Set environment ID from context if not already set
+	if m.EnvironmentID == "" {
+		m.EnvironmentID = types.GetEnvironmentID(ctx)
+	}
+
+	meter, err := client.Meter.Create().
+		SetID(m.ID).
+		SetTenantID(m.TenantID).
+		SetEventName(m.EventName).
+		SetName(m.Name).
+		SetAggregation(m.ToEntAggregation()).
+		SetFilters(m.ToEntFilters()).
+		SetResetUsage(string(m.ResetUsage)).
+		SetStatus(string(m.Status)).
+		SetCreatedAt(m.CreatedAt).
+		SetUpdatedAt(m.UpdatedAt).
+		SetCreatedBy(m.CreatedBy).
+		SetUpdatedBy(m.UpdatedBy).
+		SetEnvironmentID(m.EnvironmentID).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		return ierr.WithError(err).
+			WithMessage("failed to create meter").
+			WithHint("Failed to create meter").
+			WithReportableDetails(map[string]any{
+				"meter_id":  m.ID,
+				"tenant_id": m.TenantID,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	*m = *domainMeter.FromEnt(meter)
+	return nil
+}
+
+func (r *meterRepository) GetMeter(ctx context.Context, id string) (*domainMeter.Meter, error) {
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "meter", "get", map[string]interface{}{
+		"meter_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+
+	// Try to get from cache first
+	if cachedMeter := r.GetCache(ctx, id); cachedMeter != nil {
+		return cachedMeter, nil
+	}
+
+	m, err := client.Meter.Query().
+		Where(
+			meter.ID(id),
+			meter.TenantID(types.GetTenantID(ctx)),
+			meter.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		Only(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return nil, ierr.WithError(err).
+				WithMessage("meter not found").
+				WithHint("Meter not found").
+				WithReportableDetails(map[string]any{
+					"meter_id":  id,
+					"tenant_id": types.GetTenantID(ctx),
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return nil, ierr.WithError(err).
+			WithMessage("failed to get meter").
+			WithHint("Failed to retrieve meter").
+			WithReportableDetails(map[string]any{
+				"meter_id":  id,
+				"tenant_id": types.GetTenantID(ctx),
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	meter := domainMeter.FromEnt(m)
+	// Set cache
+	r.SetCache(ctx, meter)
+	return meter, nil
+}
+
+func (r *meterRepository) ListByIDs(ctx context.Context, ids []string) ([]*domainMeter.Meter, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	span := StartRepositorySpan(ctx, "meter", "list_by_ids", map[string]interface{}{
+		"meter_ids_count": len(ids),
+	})
+	defer FinishSpan(span)
+
+	result := make([]*domainMeter.Meter, 0, len(ids))
+	missing := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+
+		if cached := r.GetCache(ctx, id); cached != nil {
+			result = append(result, cached)
+			continue
+		}
+		missing = append(missing, id)
+	}
+
+	if len(missing) == 0 {
+		SetSpanSuccess(span)
+		return result, nil
+	}
+
+	filter := types.NewNoLimitMeterFilter()
+	filter.MeterIDs = missing
+	fetched, err := r.List(ctx, filter)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, err
+	}
+
+	for _, m := range fetched {
+		r.SetCache(ctx, m)
+		result = append(result, m)
+	}
+
+	SetSpanSuccess(span)
+	return result, nil
+}
+
+func (r *meterRepository) List(ctx context.Context, filter *types.MeterFilter) ([]*domainMeter.Meter, error) {
+	span := StartRepositorySpan(ctx, "meter", "list", map[string]interface{}{
+		"filter": filter,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	query := client.Meter.Query()
+
+	// Apply base filters
+	query = ApplyQueryOptions(ctx, query, filter, r.queryOpts)
+
+	// Apply entity-specific filters
+	query = r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+
+	// Execute query
+	meters, err := query.All(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return nil, ierr.WithError(err).
+			WithMessage("failed to list meters").
+			WithHint("Could not retrieve meters list").
+			WithReportableDetails(map[string]any{
+				"tenant_id": types.GetTenantID(ctx),
+				"filter":    filter,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	// Convert to domain models
+	result := make([]*domainMeter.Meter, len(meters))
+	for i, m := range meters {
+		result[i] = domainMeter.FromEnt(m)
+	}
+
+	SetSpanSuccess(span)
+	return result, nil
+}
+
+// GetMatchingMetersByEventName fetches published meters for the event name using the in-memory cache first.
+func (r *meterRepository) GetMatchingMetersByEventName(ctx context.Context, eventName string) ([]*domainMeter.Meter, error) {
+	eventName = strings.TrimSpace(eventName)
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixMeter, "event_name", eventName)
+
+	if cached, found := r.cache.ForceCacheGet(ctx, cacheKey); found {
+		meters, ok := cache.UnmarshalCacheValue[[]*domainMeter.Meter](cached)
+		if ok {
+			return *meters, nil
+		}
+		r.logger.Info(ctx, "failed to unmarshal meters from cache, treating as miss",
+			"cache_key", cacheKey,
+			"event_name", eventName,
+		)
+		r.cache.ForceCacheDelete(ctx, cacheKey)
+	}
+
+	filter := types.NewNoLimitMeterFilter()
+	filter.EventName = eventName
+	filter.Status = lo.ToPtr(types.StatusPublished)
+
+	meters, err := r.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(meters) > 0 {
+		r.cache.ForceCacheSet(ctx, cacheKey, meters, matchingMetersByEventNameCacheTTL)
+	}
+	return meters, nil
+}
+
+func (r *meterRepository) ListAll(ctx context.Context, filter *types.MeterFilter) ([]*domainMeter.Meter, error) {
+	if filter == nil {
+		filter = types.NewNoLimitMeterFilter()
+	}
+
+	if filter.QueryFilter == nil {
+		filter.QueryFilter = types.NewNoLimitQueryFilter()
+	}
+
+	return r.List(ctx, filter)
+}
+
+func (r *meterRepository) Count(ctx context.Context, filter *types.MeterFilter) (int, error) {
+	span := StartRepositorySpan(ctx, "meter", "count", map[string]interface{}{
+		"filter": filter,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Reader(ctx)
+	query := client.Meter.Query()
+
+	// Apply base filters
+	query = ApplyBaseFilters(ctx, query, filter, r.queryOpts)
+
+	// Apply entity-specific filters
+	query = r.queryOpts.applyEntityQueryOptions(ctx, filter, query)
+
+	count, err := query.Count(ctx)
+	if err != nil {
+		SetSpanError(span, err)
+		return 0, ierr.WithError(err).
+			WithMessage("failed to count meters").
+			WithHint("Could not count meters").
+			WithReportableDetails(map[string]any{
+				"tenant_id": types.GetTenantID(ctx),
+				"filter":    filter,
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	return count, nil
+}
+
+func (r *meterRepository) DisableMeter(ctx context.Context, id string) error {
+	client := r.client.Writer(ctx)
+
+	// Start a span for this repository operation
+	span := StartRepositorySpan(ctx, "meter", "disable", map[string]interface{}{
+		"meter_id": id,
+	})
+	defer FinishSpan(span)
+
+	_, err := client.Meter.Update().
+		Where(
+			meter.ID(id),
+			meter.TenantID(types.GetTenantID(ctx)),
+			meter.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		SetStatus(string(types.StatusArchived)).
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithMessage("meter not found").
+				WithHint("Meter not found").
+				WithReportableDetails(map[string]any{
+					"meter_id":  id,
+					"tenant_id": types.GetTenantID(ctx),
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithMessage("failed to disable meter").
+			WithHint("Failed to disable meter").
+			WithReportableDetails(map[string]any{
+				"meter_id":  id,
+				"tenant_id": types.GetTenantID(ctx),
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	r.DeleteCache(ctx, id)
+	return nil
+}
+
+func (r *meterRepository) UpdateMeter(ctx context.Context, id string, filters []domainMeter.Filter) error {
+	span := StartRepositorySpan(ctx, "meter", "update", map[string]interface{}{
+		"meter_id": id,
+	})
+	defer FinishSpan(span)
+
+	client := r.client.Writer(ctx)
+
+	r.logger.Debug(ctx, "updating meter",
+		"meter_id", id,
+		"tenant_id", types.GetTenantID(ctx),
+	)
+
+	m := &domainMeter.Meter{Filters: filters}
+	_, err := client.Meter.Update().
+		Where(
+			meter.ID(id),
+			meter.TenantID(types.GetTenantID(ctx)),
+			meter.EnvironmentID(types.GetEnvironmentID(ctx)),
+		).
+		SetFilters(m.ToEntFilters()).
+		SetUpdatedAt(time.Now().UTC()).
+		SetUpdatedBy(types.GetUserID(ctx)).
+		Save(ctx)
+
+	if err != nil {
+		SetSpanError(span, err)
+		if ent.IsNotFound(err) {
+			return ierr.WithError(err).
+				WithMessage("meter not found").
+				WithHint("Meter not found").
+				WithReportableDetails(map[string]any{
+					"meter_id":  id,
+					"tenant_id": types.GetTenantID(ctx),
+				}).
+				Mark(ierr.ErrNotFound)
+		}
+		return ierr.WithError(err).
+			WithMessage("failed to update meter").
+			WithHint("Failed to update meter").
+			WithReportableDetails(map[string]any{
+				"meter_id":  id,
+				"tenant_id": types.GetTenantID(ctx),
+			}).
+			Mark(ierr.ErrDatabase)
+	}
+
+	SetSpanSuccess(span)
+	r.DeleteCache(ctx, id)
+	return nil
+}
+
+// Query option methods
+type MeterQuery = *ent.MeterQuery
+
+// MeterQueryOptions implements BaseQueryOptions for meter queries
+type MeterQueryOptions struct{}
+
+func (o MeterQueryOptions) ApplyTenantFilter(ctx context.Context, query MeterQuery) MeterQuery {
+	return query.Where(meter.TenantID(types.GetTenantID(ctx)))
+}
+
+func (o MeterQueryOptions) ApplyEnvironmentFilter(ctx context.Context, query MeterQuery) MeterQuery {
+	environmentID := types.GetEnvironmentID(ctx)
+	if environmentID != "" {
+		return query.Where(meter.EnvironmentID(environmentID))
+	}
+	return query
+}
+
+func (o MeterQueryOptions) ApplyStatusFilter(query MeterQuery, status string) MeterQuery {
+	if status == "" {
+		return query.Where(meter.StatusIn(
+			string(types.StatusPublished),
+			string(types.StatusArchived),
+		))
+	}
+	return query.Where(meter.Status(status))
+}
+
+func (o MeterQueryOptions) ApplySortFilter(query MeterQuery, field string, order string) MeterQuery {
+	orderFunc := ent.Desc
+	if order == types.OrderAsc {
+		orderFunc = ent.Asc
+	}
+	return query.Order(orderFunc(o.GetFieldName(field)))
+}
+
+func (o MeterQueryOptions) ApplyPaginationFilter(query MeterQuery, limit int, offset int) MeterQuery {
+	query = query.Limit(limit)
+	if offset > 0 {
+		query = query.Offset(offset)
+	}
+	return query
+}
+
+// GetFieldName returns the ent field name for meter; delegates to ent's ValidColumn so new schema fields are supported automatically.
+func (o MeterQueryOptions) GetFieldName(field string) string {
+	if meter.ValidColumn(field) {
+		return field
+	}
+	return ""
+}
+
+func (o MeterQueryOptions) applyEntityQueryOptions(_ context.Context, f *types.MeterFilter, query MeterQuery) MeterQuery {
+	if f == nil {
+		return query
+	}
+
+	if f.EventName != "" {
+		trimmed := strings.TrimSpace(f.EventName)
+		query = query.Where(meter.EventName(trimmed))
+	}
+
+	if len(f.MeterIDs) > 0 {
+		query = query.Where(meter.IDIn(f.MeterIDs...))
+	}
+
+	// Apply time range filters if specified
+	if f.TimeRangeFilter != nil {
+		if f.StartTime != nil {
+			query = query.Where(meter.CreatedAtGTE(*f.StartTime))
+		}
+		if f.EndTime != nil {
+			query = query.Where(meter.CreatedAtLTE(*f.EndTime))
+		}
+	}
+
+	return query
+}
+
+func (r *meterRepository) SetCache(ctx context.Context, meter *domainMeter.Meter) {
+	span, ctx := cache.StartInMemoryCacheSpan(ctx, "meter", "set", map[string]interface{}{
+		"meter_id": meter.ID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixMeter, meter.ID)
+	r.cache.Set(ctx, cacheKey, meter, cache.ExpiryDefaultInMemory)
+}
+
+func (r *meterRepository) GetCache(ctx context.Context, id string) *domainMeter.Meter {
+	span, ctx := cache.StartInMemoryCacheSpan(ctx, "meter", "get", map[string]interface{}{
+		"meter_id": id,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixMeter, id)
+	value, found := r.cache.Get(ctx, cacheKey)
+	if !found {
+		return nil
+	}
+	m, ok := cache.UnmarshalCacheValue[domainMeter.Meter](value)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+func (r *meterRepository) DeleteCache(ctx context.Context, meterID string) {
+	span, ctx := cache.StartInMemoryCacheSpan(ctx, "meter", "delete", map[string]interface{}{
+		"meter_id": meterID,
+	})
+	defer cache.FinishSpan(span)
+
+	cacheKey := cache.GenerateKey(ctx, cache.PrefixMeter, meterID)
+	r.cache.Delete(ctx, cacheKey)
+}

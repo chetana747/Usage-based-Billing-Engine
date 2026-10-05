@@ -1,0 +1,133 @@
+package schema
+
+import (
+	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema/field"
+	"entgo.io/ent/schema/index"
+	baseMixin "github.com/flexprice/flexprice/ent/schema/mixin"
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/shopspring/decimal"
+)
+
+// Wallet holds the schema definition for the Wallet entity.
+type Wallet struct {
+	ent.Schema
+}
+
+// Mixin of the Wallet.
+func (Wallet) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		baseMixin.BaseMixin{},
+		baseMixin.EnvironmentMixin{},
+	}
+}
+
+// Fields of the Wallet.
+func (Wallet) Fields() []ent.Field {
+	return []ent.Field{
+		field.String("id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Unique().
+			Immutable(),
+		field.String("name").
+			SchemaType(map[string]string{
+				"postgres": "varchar(255)",
+			}).
+			Optional(),
+		field.String("customer_id").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			NotEmpty().
+			Immutable(),
+		field.String("currency").
+			SchemaType(map[string]string{
+				"postgres": "varchar(10)",
+			}).
+			NotEmpty(),
+		field.String("description").
+			Optional(),
+		field.JSON("metadata", map[string]string{}).
+			Optional().
+			SchemaType(map[string]string{
+				"postgres": "jsonb",
+			}),
+		field.Other("balance", decimal.Decimal{}).
+			SchemaType(map[string]string{
+				"postgres": "numeric(20,9)",
+			}).
+			Default(decimal.Zero),
+		field.Other("credit_balance", decimal.Decimal{}).
+			SchemaType(map[string]string{
+				"postgres": "numeric(20,9)",
+			}).
+			Annotations(
+				entsql.Default("0"),
+			),
+		field.String("wallet_status").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Default(string(types.WalletStatusActive)).
+			GoType(types.WalletStatus("")),
+		field.JSON("auto_topup", &types.AutoTopup{}).
+			SchemaType(map[string]string{
+				"postgres": "jsonb",
+			}).
+			Optional(),
+		field.String("wallet_type").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Immutable().
+			Default(string(types.WalletTypePrePaid)).
+			GoType(types.WalletType("")),
+
+		// conversion_rate is used for converting the wallet credits to the currency during consumption
+		field.Other("conversion_rate", decimal.Decimal{}).
+			SchemaType(map[string]string{
+				"postgres": "numeric(10,5)",
+			}).
+			Immutable().
+			Default(decimal.NewFromInt(1)),
+
+		// topup_conversion_rate is the conversion rate for the topup to the currency
+		field.Other("topup_conversion_rate", decimal.Decimal{}).
+			SchemaType(map[string]string{
+				"postgres": "numeric(10,5)",
+			}).
+			// TODO: remove this after migration
+			Optional().
+			Nillable().
+			Immutable().
+			Default(decimal.NewFromInt(1)),
+
+		field.JSON("config", types.WalletConfig{}).
+			Optional(),
+		field.JSON("alert_settings", types.AlertSettings{}).
+			Optional(),
+		field.String("alert_state").
+			SchemaType(map[string]string{
+				"postgres": "varchar(50)",
+			}).
+			Optional().
+			Default(string(types.AlertStateOk)).
+			GoType(types.AlertState("")),
+	}
+}
+
+// Edges of the Wallet.
+func (Wallet) Edges() []ent.Edge {
+	return nil
+}
+
+// Indexes of the Wallet.
+func (Wallet) Indexes() []ent.Index {
+	return []ent.Index{
+		index.Fields("tenant_id", "environment_id", "customer_id", "status"),
+		index.Fields("tenant_id", "environment_id", "status", "wallet_status"),
+	}
+}

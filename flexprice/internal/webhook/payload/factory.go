@@ -1,0 +1,251 @@
+package payload
+
+import (
+	"fmt"
+
+	"github.com/flexprice/flexprice/internal/types"
+)
+
+// PayloadBuilderFactory interface for getting event-specific payload builders
+type PayloadBuilderFactory interface {
+	GetBuilder(eventType types.WebhookEventName) (PayloadBuilder, error)
+}
+
+type payloadBuilderFactory struct {
+	builders map[types.WebhookEventName]func() PayloadBuilder
+	services *Services
+}
+
+// NewPayloadBuilderFactory creates a new factory with registered builders
+func NewPayloadBuilderFactory(services *Services) PayloadBuilderFactory {
+	f := &payloadBuilderFactory{
+		builders: make(map[types.WebhookEventName]func() PayloadBuilder),
+		services: services,
+	}
+
+	// Register invoice builders
+	f.builders[types.WebhookEventInvoiceUpdateFinalized] = func() PayloadBuilder {
+		return NewInvoicePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventInvoiceUpdateVoided] = func() PayloadBuilder {
+		return NewInvoicePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventInvoiceUpdatePayment] = func() PayloadBuilder {
+		return NewInvoicePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventInvoiceUpdate] = func() PayloadBuilder {
+		return NewInvoicePayloadBuilder(f.services)
+	}
+
+	for _, e := range []types.WebhookEventName{
+		types.WebhookEventInvoiceSyncSuccess,
+		types.WebhookEventInvoiceSyncFailed,
+	} {
+		f.builders[e] = func() PayloadBuilder {
+			return NewInvoiceSyncPayloadBuilder(f.services)
+		}
+	}
+
+	// Register refund builders
+	for _, e := range []types.WebhookEventName{
+		types.WebhookEventRefundCreated,
+		types.WebhookEventRefundSucceeded,
+		types.WebhookEventRefundFailed,
+	} {
+		f.builders[e] = func() PayloadBuilder {
+			return NewRefundPayloadBuilder(f.services)
+		}
+	}
+
+	// Register communication builder
+	f.builders[types.WebhookEventInvoiceCommunicationTriggered] = func() PayloadBuilder {
+		return NewCommunicationPayloadBuilder(f.services)
+	}
+
+	// Register subscription builders
+	f.builders[types.WebhookEventSubscriptionCreated] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionDraftCreated] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionActivated] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionPaused] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionCancelled] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionResumed] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionUpdated] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionRenewalDue] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionPlanChanged] = func() PayloadBuilder {
+		return NewSubscriptionPayloadBuilder(f.services)
+	}
+
+	f.builders[types.WebhookEventSubscriptionPhaseCreated] = func() PayloadBuilder {
+		return NewSubscriptionPhasePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionPhaseUpdated] = func() PayloadBuilder {
+		return NewSubscriptionPhasePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionPhaseDeleted] = func() PayloadBuilder {
+		return NewSubscriptionPhasePayloadBuilder(f.services)
+	}
+
+	// Register feature builders
+	f.builders[types.WebhookEventFeatureCreated] = func() PayloadBuilder {
+		return NewFeaturePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventFeatureUpdated] = func() PayloadBuilder {
+		return NewFeaturePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventFeatureDeleted] = func() PayloadBuilder {
+		return NewFeaturePayloadBuilder(f.services)
+	}
+
+	// Register entitlement builders
+	f.builders[types.WebhookEventEntitlementCreated] = func() PayloadBuilder {
+		return NewEntitlementPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventEntitlementUpdated] = func() PayloadBuilder {
+		return NewEntitlementPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventEntitlementDeleted] = func() PayloadBuilder {
+		return NewEntitlementPayloadBuilder(f.services)
+	}
+
+	// wallet builders
+	f.builders[types.WebhookEventWalletCreated] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletUpdated] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletTerminated] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletTransactionCreated] = func() PayloadBuilder {
+		return NewTransactionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletTransactionUpdated] = func() PayloadBuilder {
+		return NewTransactionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletCreditBalanceDropped] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletCreditBalanceRecovered] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletOngoingBalanceDropped] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletOngoingBalanceRecovered] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventWalletOngoingBalanceUpdated] = func() PayloadBuilder {
+		return NewWalletPayloadBuilder(f.services)
+	}
+
+	// customer builders
+	f.builders[types.WebhookEventCustomerCreated] = func() PayloadBuilder {
+		return NewCustomerPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCustomerUpdated] = func() PayloadBuilder {
+		return NewCustomerPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCustomerDeleted] = func() PayloadBuilder {
+		return NewCustomerPayloadBuilder(f.services)
+	}
+
+	// payment builders
+	f.builders[types.WebhookEventPaymentCreated] = func() PayloadBuilder {
+		return NewPaymentPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventPaymentUpdated] = func() PayloadBuilder {
+		return NewPaymentPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventPaymentFailed] = func() PayloadBuilder {
+		return NewPaymentPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventPaymentSuccess] = func() PayloadBuilder {
+		return NewPaymentPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventPaymentPending] = func() PayloadBuilder {
+		return NewPaymentPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventInvoicePaymentOverdue] = func() PayloadBuilder {
+		return NewInvoicePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCreditNoteCreated] = func() PayloadBuilder {
+		return NewCreditNotePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCreditNoteUpdated] = func() PayloadBuilder {
+		return NewCreditNotePayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventFeatureWalletBalanceAlert] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+
+	// event (usage ingestion) builder
+	f.builders[types.WebhookEventEventRejected] = func() PayloadBuilder {
+		return NewRejectedEventPayloadBuilder(f.services)
+	}
+
+	// spend alert builders (alert_settings table)
+	f.builders[types.WebhookEventSubscriptionSpendThresholdReached] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionSpendThresholdRecovered] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionLineItemSpendThresholdReached] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionLineItemSpendThresholdRecovered] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionGroupSpendThresholdReached] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventSubscriptionGroupSpendThresholdRecovered] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventEntitlementGrantExhausted] = func() PayloadBuilder {
+		return NewAlertPayloadBuilder(f.services)
+	}
+
+	// checkout session builders
+	f.builders[types.WebhookEventCheckoutSessionInitiated] = func() PayloadBuilder {
+		return NewCheckoutSessionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCheckoutSessionCompleted] = func() PayloadBuilder {
+		return NewCheckoutSessionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCheckoutSessionFailed] = func() PayloadBuilder {
+		return NewCheckoutSessionPayloadBuilder(f.services)
+	}
+	f.builders[types.WebhookEventCheckoutSessionExpired] = func() PayloadBuilder {
+		return NewCheckoutSessionPayloadBuilder(f.services)
+	}
+
+	return f
+}
+
+// GetBuilder returns a payload builder for the given event type
+func (f *payloadBuilderFactory) GetBuilder(eventType types.WebhookEventName) (PayloadBuilder, error) {
+	builderFn, ok := f.builders[eventType]
+	if !ok {
+		return nil, fmt.Errorf("no builder registered for event type: %s", eventType)
+	}
+
+	return builderFn(), nil
+}

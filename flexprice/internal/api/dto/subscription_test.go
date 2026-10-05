@@ -1,0 +1,424 @@
+package dto
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/flexprice/flexprice/internal/types"
+	"github.com/samber/lo"
+	"github.com/shopspring/decimal"
+)
+
+func TestLineItemCommitmentConfig_Validate_OverageFactor(t *testing.T) {
+	amount := decimal.NewFromInt(100)
+
+	t.Run("accepts overage factor of exactly 1.0", func(t *testing.T) {
+		c := &LineItemCommitmentConfig{
+			CommitmentAmount: &amount,
+			CommitmentType:   types.COMMITMENT_TYPE_AMOUNT,
+			OverageFactor:    lo.ToPtr(decimal.NewFromInt(1)),
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("rejects overage factor below 1.0", func(t *testing.T) {
+		c := &LineItemCommitmentConfig{
+			CommitmentAmount: &amount,
+			CommitmentType:   types.COMMITMENT_TYPE_AMOUNT,
+			OverageFactor:    lo.ToPtr(decimal.NewFromFloat(0.5)),
+		}
+		err := c.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "overage_factor must be at least 1.0") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("defaults overage factor when only time buckets are set", func(t *testing.T) {
+		c := &LineItemCommitmentConfig{
+			IsWindowCommitment: lo.ToPtr(true),
+			CommitmentTimeBuckets: []CommitmentBucketRequest{{
+				ID:              "bkt_existing",
+				Start:           types.Bucket{Hour: 8},
+				End:             types.Bucket{Hour: 20},
+				CommitmentType:  types.COMMITMENT_TYPE_QUANTITY,
+				CommitmentValue: decimal.NewFromInt(10),
+			}},
+		}
+		c.ApplyDefaults()
+		if err := c.Validate(); err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		if c.OverageFactor == nil || !c.OverageFactor.Equal(decimal.NewFromInt(1)) {
+			t.Fatalf("expected default overage factor 1, got: %v", c.OverageFactor)
+		}
+	})
+}
+
+func baseCreateSubscriptionRequest() CreateSubscriptionRequest {
+	return CreateSubscriptionRequest{
+		CustomerID:      "cust_test",
+		PlanID:          "plan_test",
+		Currency:        "usd",
+		BillingPeriod:   types.BILLING_PERIOD_MONTHLY,
+		BillingCycle:    types.BillingCycleAnniversary,
+		StartDate:       nil,
+		EndDate:         nil,
+		BillingAnchor:   nil,
+		PaymentBehavior: nil,
+	}
+}
+
+func TestCreateSubscriptionRequestValidate_BillingAnchorRequiresAnniversaryBillingCycle(t *testing.T) {
+	anchor := time.Now().UTC()
+
+	t.Run("fails when billing_cycle is calendar", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.BillingCycle = types.BillingCycleCalendar
+		req.BillingAnchor = &anchor
+
+		err := req.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "billing_anchor") {
+			t.Fatalf("expected error to mention billing_anchor, got: %v", err)
+		}
+	})
+
+	t.Run("passes when billing_cycle is anniversary", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.BillingCycle = types.BillingCycleAnniversary
+		req.BillingAnchor = &anchor
+
+		err := req.Validate()
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+}
+
+func TestCreateSubscriptionRequestValidate_BillingAnchorOnOrAfterStartDate(t *testing.T) {
+	start := time.Date(2024, 1, 10, 10, 0, 0, 0, time.UTC)
+
+	t.Run("passes when billing_anchor equals start_date", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.StartDate = &start
+		req.BillingCycle = types.BillingCycleAnniversary
+		anchor := time.Date(2024, 1, 10, 10, 0, 0, 0, time.UTC)
+		req.BillingAnchor = &anchor
+
+		err := req.Validate()
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("passes when billing_anchor is after start_date", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.StartDate = &start
+		req.BillingCycle = types.BillingCycleAnniversary
+		anchor := time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC)
+		req.BillingAnchor = &anchor
+
+		err := req.Validate()
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+}
+
+func TestCancelSubscriptionRequest_Validate_BackdatedImmediate(t *testing.T) {
+	now := time.Now().UTC()
+	past := now.Add(-5 * 24 * time.Hour)
+	future := now.Add(5 * 24 * time.Hour)
+
+	tests := []struct {
+		name    string
+		req     CancelSubscriptionRequest
+		wantErr bool
+	}{
+		{
+			name: "immediate_no_cancel_at_is_valid",
+			req: CancelSubscriptionRequest{
+				CancellationType:  types.CancellationTypeImmediate,
+				ProrationBehavior: types.ProrationBehaviorNone,
+			},
+			wantErr: false,
+		},
+		{
+			name: "immediate_past_cancel_at_is_valid",
+			req: CancelSubscriptionRequest{
+				CancellationType:  types.CancellationTypeImmediate,
+				ProrationBehavior: types.ProrationBehaviorNone,
+				CancelAt:          &past,
+			},
+			wantErr: false,
+		},
+		{
+			name: "immediate_future_cancel_at_is_rejected",
+			req: CancelSubscriptionRequest{
+				CancellationType:  types.CancellationTypeImmediate,
+				ProrationBehavior: types.ProrationBehaviorNone,
+				CancelAt:          &future,
+			},
+			wantErr: true,
+		},
+		{
+			name: "scheduled_date_past_cancel_at_is_valid",
+			req: CancelSubscriptionRequest{
+				CancellationType:  types.CancellationTypeScheduledDate,
+				ProrationBehavior: types.ProrationBehaviorNone,
+				CancelAt:          &past,
+			},
+			wantErr: false,
+		},
+		{
+			name: "scheduled_date_future_cancel_at_is_valid",
+			req: CancelSubscriptionRequest{
+				CancellationType:  types.CancellationTypeScheduledDate,
+				ProrationBehavior: types.ProrationBehaviorNone,
+				CancelAt:          &future,
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.req.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected validation error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateSubscriptionRequestValidate_AutoInvoiceThreshold(t *testing.T) {
+	t.Run("nil passes", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		if err := req.Validate(); err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("zero passes", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		z := decimal.Zero
+		req.AutoInvoiceThreshold = &z
+		if err := req.Validate(); err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("positive passes", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		p := decimal.RequireFromString("10")
+		req.AutoInvoiceThreshold = &p
+		if err := req.Validate(); err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("negative fails mentioning auto_invoice_threshold", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		n := decimal.NewFromInt(-1)
+		req.AutoInvoiceThreshold = &n
+		err := req.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "auto_invoice_threshold") {
+			t.Fatalf("expected error to mention auto_invoice_threshold, got: %v", err)
+		}
+	})
+}
+
+func TestSubscriptionInheritanceConfig_Validate_GroupedInvoicingChildrenToCreate(t *testing.T) {
+	t.Run("rejects combining with subscriptions_ids_for_grouped_invoicing", func(t *testing.T) {
+		c := &SubscriptionInheritanceConfig{
+			GroupedInvoicingChildrenToCreate: []GroupedInvoicingChildRequest{
+				{PlanID: "plan_seat", ExternalCustomerID: "ext_seat_1"},
+			},
+			SubscriptionsIDsForGroupedInvoicing: []string{"sub_existing_1"},
+		}
+
+		err := c.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+		if !strings.Contains(err.Error(), "grouped_invoicing_children_to_create") {
+			t.Fatalf("expected error to mention grouped_invoicing_children_to_create, got: %v", err)
+		}
+	})
+
+	t.Run("passes with only grouped_invoicing_children_to_create set", func(t *testing.T) {
+		c := &SubscriptionInheritanceConfig{
+			GroupedInvoicingChildrenToCreate: []GroupedInvoicingChildRequest{
+				{PlanID: "plan_seat", ExternalCustomerID: "ext_seat_1"},
+			},
+		}
+
+		err := c.Validate()
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+
+	t.Run("nil config still passes", func(t *testing.T) {
+		var c *SubscriptionInheritanceConfig
+		if err := c.Validate(); err != nil {
+			t.Fatalf("expected no error for nil config, got: %v", err)
+		}
+	})
+}
+
+func TestCreateSubscriptionRequestValidate_GroupedInvoicingChildrenToCreate_RequiredFields(t *testing.T) {
+	t.Run("rejects a child missing plan_id", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.Inheritance = &SubscriptionInheritanceConfig{
+			GroupedInvoicingChildrenToCreate: []GroupedInvoicingChildRequest{
+				{ExternalCustomerID: "ext_seat_1"},
+			},
+		}
+
+		err := req.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+	})
+
+	t.Run("rejects a child missing external_customer_id", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.Inheritance = &SubscriptionInheritanceConfig{
+			GroupedInvoicingChildrenToCreate: []GroupedInvoicingChildRequest{
+				{PlanID: "plan_seat"},
+			},
+		}
+
+		err := req.Validate()
+		if err == nil {
+			t.Fatal("expected validation error, got nil")
+		}
+	})
+
+	t.Run("passes with both fields set", func(t *testing.T) {
+		req := baseCreateSubscriptionRequest()
+		req.Inheritance = &SubscriptionInheritanceConfig{
+			GroupedInvoicingChildrenToCreate: []GroupedInvoicingChildRequest{
+				{PlanID: "plan_seat", ExternalCustomerID: "ext_seat_1"},
+			},
+		}
+
+		if err := req.Validate(); err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+	})
+}
+
+func TestCreateSubscriptionRequestValidate_IncludePriceIDs(t *testing.T) {
+	tests := []struct {
+		name    string
+		ids     *[]string // nil / empty / non-empty distinguished by pointer
+		wantErr bool
+		errSub  string
+	}{
+		{
+			name:    "nil is valid (default behavior)",
+			ids:     nil,
+			wantErr: false,
+		},
+		{
+			name:    "empty slice is valid (attach no plan prices)",
+			ids:     &[]string{},
+			wantErr: false,
+		},
+		{
+			name:    "unique ids valid",
+			ids:     &[]string{"price_a", "price_b", "price_c"},
+			wantErr: false,
+		},
+		{
+			name:    "duplicate ids rejected",
+			ids:     &[]string{"price_a", "price_b", "price_a"},
+			wantErr: true,
+			errSub:  "duplicate",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := baseCreateSubscriptionRequest()
+			req.IncludePriceIDs = tc.ids
+			err := req.Validate()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected validation error mentioning %q, got nil", tc.errSub)
+				}
+				if !strings.Contains(err.Error(), tc.errSub) {
+					t.Fatalf("expected error to mention %q, got: %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateSubscriptionRequestValidate_LineItemGrouping(t *testing.T) {
+	tests := []struct {
+		name     string
+		grouping types.LineItemGrouping
+		wantErr  bool
+	}{
+		{"omitted is valid", types.LineItemGrouping(""), false},
+		{"per charge period", types.LineItemGroupingPerChargePeriod, false},
+		{"per billing period", types.LineItemGroupingPerBillingPeriod, false},
+		{"unknown rejected", types.LineItemGrouping("PER_FORTNIGHT"), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := baseCreateSubscriptionRequest()
+			req.LineItemGrouping = tc.grouping
+			err := req.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected validation error for %q, got nil", tc.grouping)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for %q, got: %v", tc.grouping, err)
+			}
+		})
+	}
+}
+
+func TestCreateSubscriptionRequestToSubscription_CarriesLineItemGrouping(t *testing.T) {
+	req := baseCreateSubscriptionRequest()
+	req.LineItemGrouping = types.LineItemGroupingPerBillingPeriod
+
+	sub := req.ToSubscription(context.Background())
+
+	if sub.LineItemGrouping != types.LineItemGroupingPerBillingPeriod {
+		t.Errorf("LineItemGrouping = %q, want %q", sub.LineItemGrouping, types.LineItemGroupingPerBillingPeriod)
+	}
+}
+
+func TestCreateSubscriptionRequestToSubscription_DefaultsLineItemGrouping(t *testing.T) {
+	req := baseCreateSubscriptionRequest()
+
+	sub := req.ToSubscription(context.Background())
+
+	if sub.LineItemGrouping != types.LineItemGroupingPerChargePeriod {
+		t.Errorf("LineItemGrouping = %q, want %q when omitted", sub.LineItemGrouping, types.LineItemGroupingPerChargePeriod)
+	}
+}
