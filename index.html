@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>The Meter — AI Usage Billing Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="canvas-presentation">
+
+    <!-- Top Floating Presentation Bar -->
+    <header class="showcase-bar">
+        <div class="showcase-left">
+            <span class="badge-pill">AI Billing Engine</span>
+            <span class="showcase-title">The Meter · Usage-Based Pricing</span>
+        </div>
+        <div class="showcase-controls">
+            <!-- Persona Switcher Pill -->
+            <div class="persona-cluster">
+                <span class="persona-label">Persona:</span>
+                <div class="persona-pills" id="seg">
+                    <!-- Populated dynamically: Admin, User 1, User 2 -->
+                </div>
+            </div>
+
+            <!-- Broker Status Switch -->
+            <div class="broker-toggle-wrapper">
+                <label class="broker-pill-toggle" title="Toggle message broker pipeline">
+                    <input type="checkbox" id="brk" checked>
+                    <span class="broker-status-indicator"></span>
+                    <span id="brkTxt">Broker: ONLINE</span>
+                </label>
+            </div>
+
+            <!-- Sound Toggle -->
+            <button id="soundToggleBtn" class="pill-btn secondary" title="Toggle audio feedback">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                </svg>
+                <span>Sound: <strong id="soundStatus">ON</strong></span>
+            </button>
+
+            <!-- View Mode Switch -->
+            <button id="viewToggleBtn" class="pill-btn secondary" title="Toggle showcase frame vs full screen">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                <span id="viewToggleText">Full Screen</span>
+            </button>
+
+            <!-- Quick Action Sample Data -->
+            <button class="pill-btn primary" data-a="sample" title="Instant Quickstart: Load Acme AI, Starter & Pro plans">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                <span>Quick Sample</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Presentation Stage / Showcase Viewport -->
+    <main class="dashboard-stage" id="dashboardStage">
+        <!-- Main Dashboard Tablet Chassis (MoneyMagic Signature Dark Frame) -->
+        <div class="dashboard-wrapper" id="dashboardWrapper">
+
+            <!-- 1. Top Navigation Bar -->
+            <nav class="top-nav">
+                <!-- Brand / Logo -->
+                <div class="brand-section" id="brandHomeBtn">
+                    <div class="brand-sunburst" aria-label="The Meter Logo">
+                        <!-- MoneyMagic Style Sunburst Ray Icon -->
+                        <svg viewBox="0 0 32 32" fill="none" class="sunburst-svg">
+                            <circle cx="16" cy="16" r="4.2" fill="#EFF52B" />
+                            <g stroke="#EFF52B" stroke-width="2" stroke-linecap="round">
+                                <line x1="16" y1="2" x2="16" y2="6.5" />
+                                <line x1="16" y1="25.5" x2="16" y2="30" />
+                                <line x1="2" y1="16" x2="6.5" y2="16" />
+                                <line x1="25.5" y1="16" x2="30" y2="16" />
+                                <line x1="6.1" y1="6.1" x2="9.3" y2="9.3" />
+                                <line x1="22.7" y1="22.7" x2="25.9" y2="25.9" />
+                                <line x1="6.1" y1="25.9" x2="9.3" y2="22.7" />
+                                <line x1="22.7" y1="9.3" x2="25.9" y2="6.1" />
+                                <line x1="10.8" y1="3.4" x2="12.5" y2="7.5" />
+                                <line x1="19.5" y1="24.5" x2="21.2" y2="28.6" />
+                                <line x1="3.4" y1="21.2" x2="7.5" y2="19.5" />
+                                <line x1="24.5" y1="12.5" x2="28.6" y2="10.8" />
+                                <line x1="21.2" y1="3.4" x2="19.5" y2="7.5" />
+                                <line x1="12.5" y1="24.5" x2="10.8" y2="28.6" />
+                                <line x1="3.4" y1="10.8" x2="7.5" y2="12.5" />
+                                <line x1="24.5" y1="19.5" x2="28.6" y2="21.2" />
+                            </g>
+                        </svg>
+                    </div>
+                    <div class="brand-text-group">
+                        <span class="brand-name">The Meter</span>
+                    </div>
+                </div>
+
+                <!-- Center Pill Menu (Steps / Navigation) -->
+                <div class="nav-pill-cluster" id="steps">
+                    <button class="nav-tab active" data-s="0">
+                        <svg class="tab-icon yellow-accent" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                            <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                            <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                            <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                        </svg>
+                        <span>Dashboard</span>
+                    </button>
+                    <button class="nav-tab" data-s="1">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                            <circle cx="9" cy="7" r="4"></circle>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                        </svg>
+                        <span>1 · Customers & Plans</span>
+                    </button>
+                    <button class="nav-tab" data-s="2">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
+                            <polyline points="17 6 23 6 23 12"></polyline>
+                        </svg>
+                        <span>2 · Subscribe & Upgrade</span>
+                    </button>
+                    <button class="nav-tab" data-s="3">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                        </svg>
+                        <span>3 · Ingest Usage</span>
+                    </button>
+                    <button class="nav-tab" data-s="4">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                        </svg>
+                        <span>4 · Invoices</span>
+                    </button>
+                    <button class="nav-tab" data-s="5">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                        </svg>
+                        <span>5 · Verify Tests</span>
+                    </button>
+                </div>
+
+                <!-- Right Quick Utility Actions -->
+                <div class="nav-actions">
+                    <button class="circle-btn dark-circle" id="openLogDrawerBtn" title="View Activity Stream Log">
+                        <span class="white-dot-indicator"></span>
+                    </button>
+                    <button class="circle-btn dark-circle" id="toggleTestsModalBtn" title="Run System Tests">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                    </button>
+                    <button class="circle-btn yellow-circle" id="userRoleAvatarBtn" title="Current Role Permissions">
+                        <svg width="19" height="19" viewBox="0 0 24 24" fill="#0C0C0E">
+                            <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                        </svg>
+                    </button>
+                </div>
+            </nav>
+
+            <!-- Role Permissions Banner / Context Bar -->
+            <div class="role-context-bar" id="who">
+                <!-- Dynamically updated role explanation -->
+            </div>
+
+            <!-- ================= VIEW 0: MAIN DASHBOARD VIEW (MoneyMagic 3-Column Layout) ================= -->
+            <div class="tab-view active" id="view-dashboard">
+                <div class="grid-container">
+
+                    <!-- ================= LEFT COLUMN ================= -->
+                    <div class="col-left">
+
+                        <!-- Total Ballance / Invoiced Revenue Card (Bright Cyber Yellow) -->
+                        <div class="card card-total-balance" id="totalBalanceCard">
+                            <div class="balance-info-pane">
+                                <div class="balance-header">
+                                    <span class="balance-title">Total Ballance</span>
+                                </div>
+                                <div class="balance-amount-wrapper">
+                                    <span class="currency-symbol">₹</span>
+                                    <span class="balance-number" id="balanceDisplay" data-value="1096.77">1,096.77</span>
+                                </div>
+                                <div class="balance-sub">BILLING ENGINE REVENUE</div>
+
+                                <div class="last-tx-box">
+                                    <div class="last-tx-val" id="lastTxVal">+ ₹ 2,200.00</div>
+                                    <div class="last-tx-label" id="lastTxLabel">Graduated Tier Usage</div>
+                                </div>
+                            </div>
+
+                            <!-- Action Buttons inside Yellow Card -->
+                            <div class="balance-actions-pane">
+                                <button class="btn-topup" data-a="sample" title="Load sample dataset">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                    </svg>
+                                    <span>SAMPLE DATA</span>
+                                </button>
+                                <button class="btn-withdraw" id="openSendEventModalBtn" title="Send token usage event">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                    <span>SEND USAGE</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Latest Transactions / Usage Pipeline: Playful Tilted Stack -->
+                        <div class="transactions-section">
+                            <div class="section-header">
+                                <h2 class="section-title">Latest Transactions & Events</h2>
+                                <button class="btn-dots" id="txFilterBtn" title="More options">
+                                    <span></span><span></span><span></span>
+                                </button>
+                            </div>
+
+                            <!-- Stack of Tilted Cards -->
+                            <div class="tx-stack" id="txStack">
+
+                                <!-- Card 1: Slate Grey / Johnson equivalent -> Acme Ingest -->
+                                <div class="tx-card tilt-item-1" data-title="Event evt-01 Accepted" data-desc="Acme AI · 50,000 Tokens" data-amount="-₹400.00" data-type="usage">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-avatar">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Acme AI Usage</div>
+                                            <div class="tx-desc">50,000 Tokens · Graduated</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount negative">₹ 500.00</div>
+                                </div>
+
+                                <!-- Card 2: Bright Yellow / Nike equivalent -> Pro Plan Upgrade -->
+                                <div class="tx-card tilt-item-2" data-title="Plan Upgrade (Prorated)" data-desc="Starter → Pro (17/31 days)" data-amount="+₹1,096.77" data-type="proration">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle black-circle">
+                                            <svg viewBox="0 0 24 24" width="16" height="16" fill="#EFF52B">
+                                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Pro Upgrade Proration</div>
+                                            <div class="tx-desc">Mid-Month Plan Switch</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount positive">+₹1,096.77</div>
+                                </div>
+
+                                <!-- Card 3: Crisp White / Mobile Phone equivalent -> Starter Base Subscription -->
+                                <div class="tx-card tilt-item-3" data-title="Monthly Subscription" data-desc="Acme AI · Starter Base Plan" data-amount="+₹1,000.00" data-type="sub">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-circle">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+                                                <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                                                <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Starter Subscription</div>
+                                            <div class="tx-desc">Base Fee Active</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount positive">+₹1,000.00</div>
+                                </div>
+
+                                <!-- Card 4: Candy Lilac / Balance Top-Up equivalent -> Deduplication Guard -->
+                                <div class="tx-card tilt-item-4" data-title="Idempotency Guard" data-desc="Duplicate Event Suppressed" data-amount="Protected" data-type="security">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-circle">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#DFB2F4" stroke-width="3">
+                                                <polyline points="20 6 9 17 4 12"></polyline>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Duplicate Protection</div>
+                                            <div class="tx-desc">Zero Double-Billing</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount positive">ACTIVE</div>
+                                </div>
+
+                                <!-- Card 5: Periwinkle Lavender / Withdrawal equivalent -> Broker Health -->
+                                <div class="tx-card tilt-item-5" data-title="Message Broker Status" data-desc="Kafka/RabbitMQ Usage Bus" data-amount="Healthy" data-type="broker">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-circle">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A09EF5" stroke-width="3">
+                                                <circle cx="12" cy="12" r="3"></circle>
+                                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Broker Pipeline</div>
+                                            <div class="tx-desc">Simulate 503 Outage</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount negative" id="brokerTxBadge">200 OK</div>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ================= MIDDLE COLUMN ================= -->
+                    <div class="col-middle">
+
+                        <!-- Report Card (Crisp White with Bar Chart) -->
+                        <div class="card card-report" id="reportCard">
+                            <div class="card-head">
+                                <h3 class="card-title-dark">Token Usage Volume</h3>
+                                <button class="btn-dots dark-dots" data-s="4" title="View Invoices">
+                                    <span></span><span></span><span></span>
+                                </button>
+                            </div>
+
+                            <!-- Bar Chart Component -->
+                            <div class="bar-chart-container">
+                                <div class="chart-y-axis">
+                                    <span>200k</span>
+                                    <span>100k</span>
+                                    <span>50k</span>
+                                    <span>25k</span>
+                                    <span>0</span>
+                                </div>
+
+                                <div class="chart-plot-area">
+                                    <div class="chart-grid-lines">
+                                        <div class="grid-line" style="bottom: 100%;"></div>
+                                        <div class="grid-line" style="bottom: 50%;"></div>
+                                        <div class="grid-line" style="bottom: 25%;"></div>
+                                        <div class="grid-line" style="bottom: 12.5%;"></div>
+                                        <div class="grid-line baseline" style="bottom: 0%;"></div>
+                                    </div>
+
+                                    <div class="chart-columns">
+                                        <!-- Column 1: JAN -->
+                                        <div class="chart-col" data-month="JAN" data-grey="155k" data-black="75k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 77.5%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 37.5%;"></div>
+                                            </div>
+                                            <span class="month-label">JAN</span>
+                                        </div>
+                                        <!-- Column 2: FEB -->
+                                        <div class="chart-col" data-month="FEB" data-grey="80k" data-black="168k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 40%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 84%;"></div>
+                                            </div>
+                                            <span class="month-label">FEB</span>
+                                        </div>
+                                        <!-- Column 3: MAR -->
+                                        <div class="chart-col" data-month="MAR" data-grey="168k" data-black="168k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 84%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 84%;"></div>
+                                            </div>
+                                            <span class="month-label">MAR</span>
+                                        </div>
+                                        <!-- Column 4: APR -->
+                                        <div class="chart-col" data-month="APR" data-grey="160k" data-black="98k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 80%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 49%;"></div>
+                                            </div>
+                                            <span class="month-label">APR</span>
+                                        </div>
+                                        <!-- Column 5: MAY -->
+                                        <div class="chart-col" data-month="MAY" data-grey="90k" data-black="168k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 45%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 84%;"></div>
+                                            </div>
+                                            <span class="month-label">MAY</span>
+                                        </div>
+                                        <!-- Column 6: JUN -->
+                                        <div class="chart-col" data-month="JUN" data-grey="168k" data-black="82k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 84%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 41%;"></div>
+                                            </div>
+                                            <span class="month-label">JUN</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Tooltip -->
+                            <div class="chart-tooltip" id="chartTooltip">
+                                <div class="tooltip-header" id="tooltipMonth">MAR</div>
+                                <div class="tooltip-row">
+                                    <span class="dot-swatch grey-dot"></span>
+                                    <span class="tooltip-lbl">Base Tier:</span>
+                                    <span class="tooltip-val" id="tooltipGreyVal">168,000 tok</span>
+                                </div>
+                                <div class="tooltip-row">
+                                    <span class="dot-swatch black-dot"></span>
+                                    <span class="tooltip-lbl">Overage:</span>
+                                    <span class="tooltip-val" id="tooltipBlackVal">168,000 tok</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Spending / Pricing Mode Card (Candy Lilac with Donut Chart) -->
+                        <div class="card card-spending" id="spendingCard">
+                            <div class="spending-top-row">
+                                <h3 class="spending-title">Pricing Mode Simulation</h3>
+                                <div class="timeframe-toggle" id="timeframeToggle">
+                                    <button class="toggle-pill-option active" data-period="graduated">Graduated</button>
+                                    <button class="toggle-pill-option" data-period="volume">Volume</button>
+                                    <div class="toggle-slider"></div>
+                                </div>
+                            </div>
+
+                            <div class="spending-content">
+                                <div class="donut-chart-box">
+                                    <svg class="donut-svg" viewBox="0 0 160 160">
+                                        <circle class="donut-ring ring-white" cx="80" cy="80" r="56"
+                                                stroke-dasharray="240 352"
+                                                stroke-dashoffset="0" />
+                                        <circle class="donut-ring ring-black" cx="80" cy="80" r="56"
+                                                stroke-dasharray="110 352"
+                                                stroke-dashoffset="-242" />
+                                    </svg>
+                                    <div class="donut-center-info">
+                                        <div class="donut-amount" id="spendingAmountDisplay">₹ 2,200.00</div>
+                                        <div class="donut-label" id="spendingLabelDisplay">250K TOKENS (GRADUATED)</div>
+                                    </div>
+                                </div>
+
+                                <div class="spending-legend">
+                                    <div class="legend-item" id="legendPersonal">
+                                        <span class="legend-name">Base Tier (100k)</span>
+                                        <div class="legend-capsule capsule-white" title="Base Tier: 100k tokens @ ₹10 = ₹1,000"></div>
+                                    </div>
+                                    <div class="legend-item" id="legendShopping">
+                                        <span class="legend-name">Upper Tier (150k)</span>
+                                        <div class="legend-capsule capsule-black" title="Upper Tier: 150k tokens @ ₹8 = ₹1,200"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- ================= RIGHT COLUMN ================= -->
+                    <div class="col-right">
+
+                        <!-- 1. Total Income -> Active Customers -->
+                        <div class="card card-metric" id="metricIncome" data-s="1">
+                            <div class="metric-top">
+                                <span class="metric-label">Active Customers</span>
+                            </div>
+                            <div class="metric-bottom">
+                                <span class="metric-value" id="activeCustomersCount">1 Active</span>
+                                <div class="metric-badge badge-green">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <polyline points="20 6 9 17 4 12"></polyline>
+                                    </svg>
+                                    <span>Acme AI</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 2. Total Saves -> Total Ingested Tokens -->
+                        <div class="card card-metric" id="metricSaves" data-s="3">
+                            <div class="metric-top">
+                                <span class="metric-label">Total Ingested Tokens</span>
+                            </div>
+                            <div class="metric-bottom">
+                                <span class="metric-value" id="totalTokensRecorded">50,000 tok</span>
+                                <div class="metric-badge badge-green">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                    <span>Live</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 3. Total Expense -> Invoiced Total -->
+                        <div class="card card-metric" id="metricExpense" data-s="4">
+                            <div class="metric-top">
+                                <span class="metric-label">Latest Bill Total</span>
+                            </div>
+                            <div class="metric-bottom">
+                                <span class="metric-value" id="metricInvoicedTotal">₹ 1,096.77</span>
+                                <div class="metric-badge badge-coral">
+                                    <span>Prorated</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 4. Upcoming -> Test Verification Suite -->
+                        <div class="card card-metric card-upcoming" id="metricUpcoming">
+                            <div class="metric-top">
+                                <span class="metric-label">Engine Test Suite</span>
+                            </div>
+                            <div class="metric-bottom upcoming-row">
+                                <span class="metric-value" id="testSuiteBadge">5 of 5 Pass</span>
+                                <button class="btn-view-details" data-a="runT">
+                                    Run Tests
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 5. Nike Banner -> Pro Plan Highlight Card -->
+                        <div class="card card-nike-banner" id="cardNikeBanner" data-s="1">
+                            <div class="nike-top-row">
+                                <div class="nike-circle-badge">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="#EFF52B">
+                                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                    </svg>
+                                </div>
+                                <button class="btn-heart" id="proPlanHeartBtn" title="Favorite Plan">
+                                    <svg class="heart-icon active" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="nike-bottom-row">
+                                <div class="nike-labels">
+                                    <div class="nike-brand">Pro Plan</div>
+                                    <div class="nike-cat">Volume Slabs · ₹8/1k tokens</div>
+                                </div>
+                                <div class="nike-price">₹ 3,000/mo</div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div> <!-- /grid-container -->
+            </div> <!-- /view-dashboard -->
+
+            <!-- ================= VIEW 1: STEP 1 · SET UP CUSTOMERS AND PLANS ================= -->
+            <div class="tab-view" id="view-step1">
+                <div class="step-card-panel">
+                    <div class="step-header-row">
+                        <div>
+                            <span class="badge-pill">Step 1</span>
+                            <h2 class="step-title">Set up customers and plans</h2>
+                            <p class="step-lead">A <b>customer</b> is a company you bill. A <b>plan</b> has a monthly base fee plus a per-1,000-token price that gets cheaper in higher volume tiers.</p>
+                        </div>
+                        <button class="pill-btn primary" data-a="sample">⚡ Load sample data (quickest)</button>
+                    </div>
+
+                    <div class="step-split-grid">
+                        <div class="form-pane">
+                            <h3 class="pane-heading">Create New Customer</h3>
+                            <div class="form-group">
+                                <label>Customer Name</label>
+                                <input type="text" id="cn" value="My Company" placeholder="e.g. Acme AI">
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action" data-a="addC">+ Add Customer</button>
+                            </div>
+
+                            <hr class="form-divider">
+
+                            <h3 class="pane-heading">Create New Pricing Plan</h3>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Plan Name</label>
+                                    <input type="text" id="pn" value="Growth">
+                                </div>
+                                <div class="form-group">
+                                    <label>Monthly Base Fee (₹)</label>
+                                    <input type="number" id="pb" value="2000" inputmode="decimal">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Pricing Mode</label>
+                                <select id="pm" class="form-select">
+                                    <option value="graduated">Graduated – each slab priced at its own rate</option>
+                                    <option value="volume">Volume – all tokens at the rate of the tier you reach</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Price Tiers (limit k tokens, ₹ per 1k tokens, flat fee)</label>
+                                <textarea id="pt" rows="4" class="code-textarea">100,10,0
+500,8,0
+-,5,0</textarea>
+                                <span class="hint">Use "-" for "no limit". Last line must be "-". Format: 100k @ ₹10, next 400k @ ₹8, rest @ ₹5.</span>
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action yellow" data-a="addP">+ Add Pricing Plan</button>
+                            </div>
+                        </div>
+
+                        <div class="catalog-pane">
+                            <h3 class="pane-heading">Current Catalog</h3>
+                            <div id="cat" class="catalog-display">
+                                <!-- Populated dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 2: STEP 2 · SUBSCRIBE & UPGRADE ================= -->
+            <div class="tab-view" id="view-step2">
+                <div class="step-card-panel">
+                    <span class="badge-pill">Step 2</span>
+                    <h2 class="step-title">Subscribe a customer, then upgrade mid-month</h2>
+                    <p class="step-lead">Subscribing starts a monthly billing period. Upgrading part-way through credits the unused part of the old plan and charges the new plan for the days left.</p>
+
+                    <div class="g2">
+                        <!-- Left: Subscribe -->
+                        <div class="step-sub-card">
+                            <h3 class="pane-heading">1. New Subscription</h3>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Customer</label>
+                                    <select id="sc" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Plan</label>
+                                    <select id="sp" class="form-select"></select>
+                                </div>
+                            </div>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Start Date</label>
+                                    <input type="date" id="sd" value="2026-03-01">
+                                </div>
+                                <div class="form-group">
+                                    <label>Retry-Safe Key (Idempotency)</label>
+                                    <input type="text" id="ik" placeholder="e.g. order-1001">
+                                    <span class="hint">Prevents double-billing when retrying.</span>
+                                </div>
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action yellow" data-a="sub">Subscribe Customer</button>
+                            </div>
+                            <div class="res" id="r1"></div>
+                        </div>
+
+                        <!-- Right: Upgrade & Prorate -->
+                        <div class="step-sub-card">
+                            <h3 class="pane-heading">2. Mid-Month Upgrade & Proration</h3>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Move to Plan</label>
+                                    <select id="up" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Upgrade On Date</label>
+                                    <input type="date" id="ua" value="2026-03-15">
+                                </div>
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action" data-a="upg">Upgrade & Calculate Proration</button>
+                            </div>
+                            <div class="res" id="r1b"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 3: STEP 3 · SEND USAGE EVENTS ================= -->
+            <div class="tab-view" id="view-step3">
+                <div class="step-card-panel">
+                    <span class="badge-pill">Step 3</span>
+                    <h2 class="step-title">Send usage events to message broker</h2>
+                    <p class="step-lead">Each API call your customer makes is an event with a unique ID. The same ID is never counted twice.</p>
+
+                    <div class="step-form-box">
+                        <div class="g2">
+                            <div class="form-group">
+                                <label>Customer</label>
+                                <select id="ec" class="form-select"></select>
+                            </div>
+                            <div class="form-group">
+                                <label>Event ID (Deduplication Key)</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="ei" placeholder="evt-xxxx">
+                                    <button class="btn-sub-action" data-a="newId" title="Generate fresh ID">New ID</button>
+                                </div>
+                                <span class="hint">Keep ID unchanged and press Send again to test duplicate protection.</span>
+                            </div>
+                        </div>
+                        <div class="g2">
+                            <div class="form-group">
+                                <label>Tokens Used</label>
+                                <input type="number" id="et" value="50000" inputmode="numeric">
+                            </div>
+                            <div class="form-group">
+                                <label>Timestamp</label>
+                                <input type="datetime-local" id="es" value="2026-03-05T10:00">
+                            </div>
+                        </div>
+                        <div class="act">
+                            <button class="btn-pill-action yellow" data-a="send">Send Usage Event</button>
+                        </div>
+                        <div class="res" id="r2"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 4: STEP 4 · INVOICES ================= -->
+            <div class="tab-view" id="view-step4">
+                <div class="step-card-panel">
+                    <span class="badge-pill">Step 4</span>
+                    <h2 class="step-title">Generate usage invoices</h2>
+                    <p class="step-lead">The invoice prices all tokens used, tier by tier, using the plan that was active when the usage happened.</p>
+
+                    <div class="step-form-box">
+                        <div class="form-group">
+                            <label>Customer</label>
+                            <select id="ic" class="form-select"></select>
+                        </div>
+                        <div class="act">
+                            <button class="btn-pill-action yellow" data-a="gen">Generate Usage Invoice</button>
+                            <button class="btn-pill-action" data-a="hist">Show All Invoices</button>
+                        </div>
+                        <div class="res" id="r3"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 5: STEP 5 · VERIFY TESTS ================= -->
+            <div class="tab-view" id="view-step5">
+                <div class="step-card-panel">
+                    <div class="step-header-row">
+                        <div>
+                            <span class="badge-pill">Step 5</span>
+                            <h2 class="step-title">Verify it works · Automated test suite</h2>
+                            <p class="step-lead">Runs the 3 required tests and the 2 improvements on a clean copy of the engine.</p>
+                        </div>
+                        <button class="btn-pill-action yellow" data-a="runT">Run All Tests</button>
+                    </div>
+
+                    <div class="res" id="r4">
+                        <!-- Populated with test cards -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bottom Collapsible Activity Log Bar -->
+            <div class="activity-drawer" id="activityDrawer">
+                <div class="activity-drawer-header" id="activityDrawerToggle">
+                    <div class="drawer-left">
+                        <span class="status-pulsing-dot"></span>
+                        <span class="drawer-title">Real-Time Event Stream Log</span>
+                    </div>
+                    <span class="drawer-toggle-arrow">▲</span>
+                </div>
+                <div class="activity-drawer-body">
+                    <div class="log" id="log"></div>
+                </div>
+            </div>
+
+        </div> <!-- /dashboard-wrapper -->
+    </main>
+
+    <!-- Quick Event Sender Modal -->
+    <div class="modal-overlay" id="quickEventModal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Quick Ingest Usage Event</h3>
+                <button class="modal-close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-hint">Push a simulated token API call to the active message broker pipeline.</p>
+                <div class="form-group">
+                    <label>Customer</label>
+                    <select id="modalCustomerSelect" class="form-select"></select>
+                </div>
+                <div class="form-group">
+                    <label>Event ID</label>
+                    <div class="input-with-button">
+                        <input type="text" id="modalEventId">
+                        <button type="button" class="btn-sub-action" id="modalGenIdBtn">Generate</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Tokens Used</label>
+                    <div class="quick-chips">
+                        <button type="button" class="chip-btn" data-tokens="10000">10k tok</button>
+                        <button type="button" class="chip-btn active" data-tokens="50000">50k tok</button>
+                        <button type="button" class="chip-btn" data-tokens="150000">150k tok</button>
+                        <button type="button" class="chip-btn" data-tokens="300000">300k tok</button>
+                    </div>
+                    <input type="number" id="modalTokensInput" value="50000">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-cancel modal-close-action">Cancel</button>
+                    <button type="button" class="btn-submit" id="modalSubmitEventBtn">Send Event</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast-notification" id="toastNotification">
+        <div class="toast-icon">✓</div>
+        <div class="toast-message" id="toastMessage">Ready</div>
+    </div>
+
+    <!-- Toast from original logic -->
+    <div id="toast" style="display:none;"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

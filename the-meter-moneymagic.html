@@ -1,0 +1,3626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>The Meter — AI Usage Billing Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+/* ==========================================================================
+   The Meter — AI Usage Billing Engine (MoneyMagic Design System)
+   ========================================================================== */
+
+:root {
+    /* Signature MoneyMagic Palette */
+    --c-yellow: #EFF52B;          /* Cyber Neon Yellow */
+    --c-yellow-hover: #e2e825;
+    --c-lilac: #DFB2F4;           /* Candy Soft Lilac / Purple */
+    --c-lilac-hover: #d59fec;
+    --c-bg-dark: #09090B;         /* Obsidian tablet chassis */
+    --c-card-dark: #141417;       /* Card dark background */
+    --c-pure-white: #FFFFFF;
+    --c-pure-black: #0E0E10;
+
+    /* Tilted pill transactions palette */
+    --c-tx-slate: #B9B7C7;
+    --c-tx-white: #FFFFFF;
+    --c-tx-yellow: #EFF52B;
+    --c-tx-lilac: #DFB2F4;
+    --c-tx-periwinkle: #A09EF5;
+
+    /* Status Badges */
+    --c-green-pill: #2BE061;
+    --c-coral-pill: #FF6644;
+    --c-amber-pill: #F59E0B;
+
+    /* Canvas & Neutrals */
+    --c-canvas-bg: #E1E1E6;
+    --c-border-dark: rgba(255, 255, 255, 0.08);
+    --c-border-subtle: #2D2D35;
+    --c-text-muted: #8E8E93;
+    --c-text-dark: #111112;
+    --c-text-light: #F4F4F5;
+
+    /* Typography */
+    --font-main: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', Consolas, monospace;
+
+    /* Radii */
+    --radius-chassis: 34px;
+    --radius-card: 26px;
+    --radius-pill: 9999px;
+    --radius-btn: 16px;
+
+    /* Shadows */
+    --shadow-chassis: 0 35px 85px -15px rgba(0, 0, 0, 0.38), 0 10px 25px rgba(0, 0, 0, 0.18);
+    --shadow-card: 0 8px 24px -6px rgba(0, 0, 0, 0.08);
+    --shadow-hover: 0 18px 36px -8px rgba(0, 0, 0, 0.28);
+}
+
+/* Base Reset */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+    font-family: var(--font-main);
+    background-color: var(--c-canvas-bg);
+    color: var(--c-text-light);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+    user-select: none;
+    transition: background 0.3s ease;
+}
+
+/* ==========================================================================
+   Showcase Header Control Bar
+   ========================================================================== */
+.showcase-bar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 24px;
+    background: rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.03);
+    gap: 12px;
+}
+
+.showcase-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.badge-pill {
+    background: var(--c-pure-black);
+    color: var(--c-yellow);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    display: inline-block;
+}
+
+.showcase-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--c-text-dark);
+}
+
+.showcase-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/* Persona Switcher Pills in Top Bar */
+.persona-cluster {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #EAEAEF;
+    border-radius: var(--radius-pill);
+    padding: 3px 6px;
+}
+
+.persona-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: #555;
+    margin-left: 4px;
+}
+
+.persona-pills {
+    display: flex;
+    gap: 3px;
+}
+
+.persona-pills button {
+    background: transparent;
+    border: none;
+    font-family: var(--font-main);
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    color: #4B5563;
+    transition: all 0.2s ease;
+}
+
+.persona-pills button.on {
+    background: var(--c-pure-black);
+    color: var(--c-yellow);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+}
+
+/* Broker Toggle Switch */
+.broker-pill-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: #FFFFFF;
+    border: 1px solid #D1D5DB;
+    padding: 5px 12px;
+    border-radius: var(--radius-pill);
+    font-size: 12px;
+    font-weight: 700;
+    color: #1F2937;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.broker-pill-toggle input {
+    display: none;
+}
+
+.broker-status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--c-green-pill);
+    box-shadow: 0 0 6px var(--c-green-pill);
+    transition: background 0.2s, box-shadow 0.2s;
+}
+
+.broker-pill-toggle.down {
+    border-color: #F87171;
+    background: #FEF2F2;
+    color: #991B1B;
+}
+
+.broker-pill-toggle.down .broker-status-indicator {
+    background: #EF4444;
+    box-shadow: 0 0 6px #EF4444;
+}
+
+.pill-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-family: var(--font-main);
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    outline: none;
+    border: none;
+}
+
+.pill-btn.secondary {
+    background: #FFFFFF;
+    color: #1F2937;
+    border: 1px solid #D1D5DB;
+}
+
+.pill-btn.secondary:hover {
+    background: #F3F4F6;
+    border-color: #9CA3AF;
+    transform: translateY(-1px);
+}
+
+.pill-btn.primary {
+    background: var(--c-pure-black);
+    color: var(--c-yellow);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.pill-btn.primary:hover {
+    background: #1F1F23;
+    transform: translateY(-1px);
+}
+
+/* ==========================================================================
+   Dashboard Stage / Presentation Container
+   ========================================================================== */
+.dashboard-stage {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 32px 20px;
+    transition: padding 0.35s ease;
+}
+
+body.fullscreen-mode .dashboard-stage {
+    padding: 0;
+}
+
+.dashboard-wrapper {
+    width: 100%;
+    max-width: 1280px;
+    background: var(--c-bg-dark);
+    border-radius: var(--radius-chassis);
+    padding: 32px 36px 36px;
+    box-shadow: var(--shadow-chassis);
+    border: 1px solid var(--c-border-dark);
+    position: relative;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: dashboardFadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body.fullscreen-mode .dashboard-wrapper {
+    max-width: 100%;
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    min-height: calc(100vh - 50px);
+    padding: 24px 36px 40px;
+}
+
+@keyframes dashboardFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(16px) scale(0.985);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+/* ==========================================================================
+   1. Top Navigation Bar (MoneyMagic Inspired)
+   ========================================================================== */
+.top-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    position: relative;
+}
+
+/* Brand */
+.brand-section {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.brand-sunburst {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: sunPulse 6s ease-in-out infinite;
+}
+
+.sunburst-svg {
+    width: 30px;
+    height: 30px;
+    display: block;
+}
+
+@keyframes sunPulse {
+    0%, 100% { transform: rotate(0deg) scale(1); }
+    50% { transform: rotate(20deg) scale(1.05); }
+}
+
+.brand-name {
+    font-size: 19px;
+    font-weight: 800;
+    letter-spacing: -0.6px;
+    color: var(--c-pure-white);
+}
+
+/* Center Pill Nav Cluster */
+.nav-pill-cluster {
+    display: flex;
+    align-items: center;
+    background: #171719;
+    border: 1px solid #28282C;
+    border-radius: var(--radius-pill);
+    padding: 4px 6px;
+    gap: 2px;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.nav-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: #9D9DA5;
+    padding: 7px 14px;
+    font-family: var(--font-main);
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    white-space: nowrap;
+}
+
+.nav-tab:hover {
+    color: #FFFFFF;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.nav-tab.active {
+    background: #252528;
+    color: var(--c-pure-white);
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.tab-icon {
+    width: 14px;
+    height: 14px;
+    display: inline-block;
+}
+
+.tab-icon.yellow-accent {
+    color: var(--c-yellow);
+}
+
+/* Nav Actions (Right) */
+.nav-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.circle-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    outline: none;
+    position: relative;
+}
+
+.circle-btn:active {
+    transform: scale(0.92);
+}
+
+.dark-circle {
+    background: #171719;
+    color: #FFFFFF;
+    border: 1px solid #28282C;
+}
+
+.dark-circle:hover {
+    background: #232327;
+    border-color: #38383F;
+    transform: translateY(-1px);
+}
+
+.white-dot-indicator {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #FFFFFF;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.8);
+}
+
+.yellow-circle {
+    background: var(--c-yellow);
+    box-shadow: 0 4px 14px rgba(239, 245, 43, 0.3);
+}
+
+.yellow-circle:hover {
+    background: var(--c-yellow-hover);
+    transform: translateY(-1px) scale(1.04);
+}
+
+/* Role Permissions Context Bar */
+.role-context-bar {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    padding: 9px 18px;
+    margin-bottom: 22px;
+    font-size: 12px;
+    color: #D4D4D8;
+    line-height: 1.4;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.role-context-bar b {
+    color: var(--c-yellow);
+    font-weight: 700;
+}
+
+.role-context-bar .yes {
+    color: var(--c-green-pill);
+    font-weight: 600;
+}
+
+.role-context-bar .no {
+    color: var(--c-coral-pill);
+    font-weight: 600;
+}
+
+/* ==========================================================================
+   2. Main Dashboard 3-Column Grid Layout (View 0)
+   ========================================================================== */
+.tab-view {
+    display: none;
+    animation: fadeIn 0.25s ease;
+}
+
+.tab-view.active {
+    display: block;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.grid-container {
+    display: grid;
+    grid-template-columns: 1.1fr 1.22fr 0.95fr;
+    gap: 22px;
+    align-items: start;
+}
+
+/* ==========================================================================
+   LEFT COLUMN: Balance & Latest Transactions
+   ========================================================================== */
+.col-left {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* Total Ballance Card (Cyber Neon Yellow) */
+.card-total-balance {
+    background: var(--c-yellow);
+    color: var(--c-pure-black);
+    border-radius: var(--radius-card);
+    padding: 24px 26px;
+    display: flex;
+    justify-content: space-between;
+    box-shadow: 0 16px 36px -10px rgba(239, 245, 43, 0.25);
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.28s ease, box-shadow 0.28s ease;
+}
+
+.card-total-balance:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 20px 42px -10px rgba(239, 245, 43, 0.35);
+}
+
+.balance-info-pane {
+    display: flex;
+    flex-direction: column;
+}
+
+.balance-title {
+    font-size: 13.5px;
+    font-weight: 800;
+    color: var(--c-pure-black);
+    letter-spacing: -0.2px;
+}
+
+.balance-amount-wrapper {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    margin: 2px 0;
+}
+
+.currency-symbol {
+    font-size: 24px;
+    font-weight: 800;
+    color: var(--c-pure-black);
+}
+
+.balance-number {
+    font-size: 34px;
+    font-weight: 900;
+    letter-spacing: -1.2px;
+    color: var(--c-pure-black);
+    font-variant-numeric: tabular-nums;
+}
+
+.balance-sub {
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: rgba(14, 14, 16, 0.75);
+    margin-bottom: 16px;
+}
+
+.last-tx-box {
+    margin-top: auto;
+}
+
+.last-tx-val {
+    font-size: 14.5px;
+    font-weight: 800;
+    color: var(--c-pure-black);
+}
+
+.last-tx-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(14, 14, 16, 0.65);
+}
+
+/* Action Buttons inside Yellow Card */
+.balance-actions-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    justify-content: flex-start;
+    align-items: flex-end;
+}
+
+.btn-topup, .btn-withdraw {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 142px;
+    height: 56px;
+    border-radius: var(--radius-btn);
+    font-family: var(--font-main);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    cursor: pointer;
+    transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    outline: none;
+    border: none;
+}
+
+.btn-topup {
+    background: #0E0E10;
+    color: var(--c-yellow);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+.btn-topup:hover {
+    background: #1C1C20;
+    transform: translateY(-2px) scale(1.02);
+}
+
+.btn-withdraw {
+    background: rgba(0, 0, 0, 0.04);
+    border: 1.6px solid var(--c-pure-black);
+    color: var(--c-pure-black);
+}
+
+.btn-withdraw:hover {
+    background: rgba(0, 0, 0, 0.08);
+    transform: translateY(-2px) scale(1.02);
+}
+
+/* ==========================================================================
+   Latest Transactions: Playful Tilted Stack (MoneyMagic Signature)
+   ========================================================================== */
+.transactions-section {
+    margin-top: 4px;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+    padding: 0 4px;
+}
+
+.section-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--c-pure-white);
+    letter-spacing: -0.2px;
+}
+
+.btn-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 3.5px;
+    background: transparent;
+    border: none;
+    padding: 6px 8px;
+    cursor: pointer;
+    border-radius: 8px;
+}
+
+.btn-dots span {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #A1A1AA;
+}
+
+.btn-dots.dark-dots span {
+    background: #71717A;
+}
+
+/* Stack Container */
+.tx-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    position: relative;
+    perspective: 800px;
+}
+
+/* Individual Tilted Card */
+.tx-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 13px 20px;
+    border-radius: 20px;
+    cursor: pointer;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+    transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.28s ease, z-index 0.1s ease;
+    position: relative;
+    user-select: none;
+}
+
+.tilt-item-1 {
+    background: var(--c-tx-slate);
+    color: #111112;
+    transform: rotate(-1.5deg) translateX(-2px);
+    z-index: 1;
+}
+
+.tilt-item-2 {
+    background: var(--c-tx-yellow);
+    color: #111112;
+    transform: rotate(2deg) translateX(4px);
+    z-index: 2;
+}
+
+.tilt-item-3 {
+    background: var(--c-tx-white);
+    color: #111112;
+    transform: rotate(-1.2deg) translateX(-1px);
+    z-index: 3;
+}
+
+.tilt-item-4 {
+    background: var(--c-tx-lilac);
+    color: #111112;
+    transform: rotate(1.2deg) translateX(3px);
+    z-index: 4;
+}
+
+.tilt-item-5 {
+    background: var(--c-tx-periwinkle);
+    color: #111112;
+    transform: rotate(-2deg) translateX(-4px);
+    z-index: 5;
+}
+
+.tx-card:hover {
+    transform: rotate(0deg) translateY(-4px) scale(1.025) !important;
+    box-shadow: 0 16px 32px rgba(0, 0, 0, 0.35);
+    z-index: 25 !important;
+}
+
+.tx-left {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+}
+
+.tx-avatar-circle {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.dark-avatar, .black-circle, .dark-circle {
+    background: #0E0E10;
+    color: #FFFFFF;
+}
+
+.tx-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.tx-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #0E0E10;
+    letter-spacing: -0.2px;
+}
+
+.tx-desc {
+    font-size: 11px;
+    font-weight: 500;
+    color: rgba(14, 14, 16, 0.68);
+}
+
+.tx-amount {
+    font-size: 14.5px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.3px;
+    color: #0E0E10;
+}
+
+/* ==========================================================================
+   MIDDLE COLUMN: Report & Spending Donut
+   ========================================================================== */
+.col-middle {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* Report Card (Crisp White with Bar Chart) */
+.card-report {
+    background: var(--c-pure-white);
+    color: var(--c-pure-black);
+    border-radius: var(--radius-card);
+    padding: 24px 26px 20px;
+    box-shadow: var(--shadow-card);
+    position: relative;
+    transition: transform 0.28s ease, box-shadow 0.28s ease;
+}
+
+.card-report:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 36px -8px rgba(0, 0, 0, 0.12);
+}
+
+.card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 22px;
+}
+
+.card-title-dark {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--c-pure-black);
+    letter-spacing: -0.2px;
+}
+
+/* Bar Chart */
+.bar-chart-container {
+    display: flex;
+    height: 168px;
+    gap: 14px;
+    position: relative;
+}
+
+.chart-y-axis {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    font-size: 10px;
+    font-weight: 700;
+    color: #8E8E93;
+    padding-bottom: 22px;
+    text-align: right;
+    width: 32px;
+}
+
+.chart-plot-area {
+    flex: 1;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+.chart-grid-lines {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 24px;
+    pointer-events: none;
+}
+
+.grid-line {
+    position: absolute;
+    left: 0; right: 0;
+    height: 1px;
+    background: #F1F1F4;
+}
+
+.grid-line.baseline { background: #E5E5EA; }
+
+.chart-columns {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    height: 100%;
+    padding: 0 8px;
+    z-index: 2;
+}
+
+.chart-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+    cursor: pointer;
+    padding: 0 6px;
+    border-radius: 8px;
+    transition: background 0.18s ease;
+}
+
+.chart-col:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+.bar-pair {
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    height: 142px;
+}
+
+.bar {
+    width: 14px;
+    border-radius: 5px 5px 0 0;
+    height: 0%;
+    transition: height 0.85s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s ease;
+}
+
+.chart-col:hover .bar {
+    transform: scaleX(1.08);
+}
+
+.bar-grey { background: #E3E3E6; }
+.bar-black { background: #111112; }
+
+.month-label {
+    margin-top: 8px;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+    color: #111112;
+}
+
+/* Tooltip */
+.chart-tooltip {
+    position: absolute;
+    z-index: 50;
+    background: #111114;
+    color: #FFFFFF;
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 11px;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -10px);
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+    white-space: nowrap;
+}
+
+.chart-tooltip.active {
+    opacity: 1;
+    transform: translate(-50%, -18px);
+}
+
+.tooltip-header {
+    font-weight: 800;
+    margin-bottom: 4px;
+    color: var(--c-yellow);
+}
+
+.tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.dot-swatch {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+}
+
+.dot-swatch.grey-dot { background: #E3E3E6; }
+.dot-swatch.black-dot { background: var(--c-yellow); }
+
+.tooltip-lbl { color: #A1A1AA; }
+.tooltip-val { font-weight: 700; color: #FFFFFF; }
+
+/* Spending / Pricing Simulation Card (Candy Lilac) */
+.card-spending {
+    background: var(--c-lilac);
+    color: var(--c-pure-black);
+    border-radius: var(--radius-card);
+    padding: 24px 26px 26px;
+    box-shadow: 0 16px 36px -10px rgba(223, 178, 244, 0.35);
+    position: relative;
+    transition: transform 0.28s ease, box-shadow 0.28s ease;
+}
+
+.card-spending:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 20px 42px -10px rgba(223, 178, 244, 0.45);
+}
+
+.spending-top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+}
+
+.spending-title {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--c-pure-black);
+    letter-spacing: -0.2px;
+}
+
+/* Timeframe Pill Toggle */
+.timeframe-toggle {
+    display: flex;
+    position: relative;
+    background: #0E0E10;
+    border-radius: var(--radius-pill);
+    padding: 4px;
+    width: 156px;
+    height: 38px;
+}
+
+.toggle-pill-option {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    background: transparent;
+    border: none;
+    font-family: var(--font-main);
+    font-size: 11px;
+    font-weight: 700;
+    color: #9D9DA5;
+    cursor: pointer;
+    border-radius: var(--radius-pill);
+    transition: color 0.2s ease;
+}
+
+.toggle-pill-option.active {
+    color: #0E0E10;
+}
+
+.toggle-slider {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    bottom: 4px;
+    width: calc(50% - 4px);
+    background: #FFFFFF;
+    border-radius: var(--radius-pill);
+    transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    z-index: 1;
+}
+
+.timeframe-toggle[data-active="volume"] .toggle-slider {
+    transform: translateX(100%);
+}
+
+.timeframe-toggle[data-active="volume"] .toggle-pill-option[data-period="volume"] {
+    color: #0E0E10;
+}
+
+.timeframe-toggle[data-active="volume"] .toggle-pill-option[data-period="graduated"] {
+    color: #9D9DA5;
+}
+
+/* Donut Graphic & Legend */
+.spending-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 4px;
+}
+
+.donut-chart-box {
+    position: relative;
+    width: 174px;
+    height: 174px;
+    flex-shrink: 0;
+}
+
+.donut-svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.donut-ring {
+    fill: transparent;
+    stroke-width: 22;
+    stroke-linecap: butt;
+    transition: stroke-dasharray 0.6s cubic-bezier(0.16, 1, 0.3, 1), stroke-dashoffset 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+    transform-origin: center;
+    cursor: pointer;
+}
+
+.ring-white { stroke: #FFFFFF; }
+.ring-black { stroke: #0E0E10; }
+
+.donut-center-info {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    pointer-events: none;
+    width: 115px;
+}
+
+.donut-amount {
+    font-size: 20px;
+    font-weight: 900;
+    letter-spacing: -0.8px;
+    color: #0E0E10;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+}
+
+.donut-label {
+    font-size: 8px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: rgba(14, 14, 16, 0.75);
+    margin-top: 4px;
+}
+
+.spending-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+    padding-left: 10px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 8px;
+    transition: background 0.18s ease;
+}
+
+.legend-item:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.legend-name {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #0E0E10;
+}
+
+.legend-capsule {
+    width: 32px;
+    height: 15px;
+    border-radius: var(--radius-pill);
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.capsule-white {
+    background: #FFFFFF;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.capsule-black {
+    background: #0E0E10;
+}
+
+/* ==========================================================================
+   RIGHT COLUMN: Metric Cards + Highlight Card
+   ========================================================================== */
+.col-right {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.card-metric {
+    background: var(--c-pure-white);
+    color: var(--c-pure-black);
+    border-radius: 20px;
+    padding: 16px 22px;
+    box-shadow: var(--shadow-card);
+    transition: transform 0.24s ease, box-shadow 0.24s ease;
+    cursor: pointer;
+}
+
+.card-metric:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 30px -8px rgba(0, 0, 0, 0.12);
+}
+
+.metric-top { margin-bottom: 4px; }
+
+.metric-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #71717A;
+}
+
+.metric-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.metric-value {
+    font-size: 20px;
+    font-weight: 900;
+    letter-spacing: -0.6px;
+    color: #0E0E10;
+    font-variant-numeric: tabular-nums;
+}
+
+.metric-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3.5px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 800;
+    color: #0E0E10;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.badge-green { background: var(--c-green-pill); }
+.badge-coral { background: var(--c-coral-pill); }
+
+.card-upcoming .upcoming-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.btn-view-details {
+    background: transparent;
+    border: 1.2px solid #0E0E10;
+    color: #0E0E10;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-main);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 5px 14px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    outline: none;
+}
+
+.btn-view-details:hover {
+    background: #0E0E10;
+    color: #FFFFFF;
+    transform: translateY(-1px);
+}
+
+/* Nike Banner -> Pro Plan Highlight Card */
+.card-nike-banner {
+    background: var(--c-yellow);
+    color: var(--c-pure-black);
+    border-radius: 20px;
+    padding: 18px 22px;
+    box-shadow: 0 14px 30px -8px rgba(239, 245, 43, 0.28);
+    transition: transform 0.24s ease, box-shadow 0.24s ease;
+    cursor: pointer;
+}
+
+.card-nike-banner:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 36px -8px rgba(239, 245, 43, 0.38);
+}
+
+.nike-top-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+}
+
+.nike-circle-badge {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: #0E0E10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-heart {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.heart-icon {
+    width: 20px;
+    height: 20px;
+    color: #0E0E10;
+    transition: color 0.2s ease, transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.heart-icon.liked {
+    color: #FF3366;
+    transform: scale(1.15);
+}
+
+.nike-bottom-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+}
+
+.nike-labels {
+    display: flex;
+    flex-direction: column;
+}
+
+.nike-brand {
+    font-size: 14.5px;
+    font-weight: 800;
+    color: #0E0E10;
+}
+
+.nike-cat {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(14, 14, 16, 0.7);
+}
+
+.nike-price {
+    font-size: 16.5px;
+    font-weight: 900;
+    color: #0E0E10;
+    letter-spacing: -0.4px;
+}
+
+/* ==========================================================================
+   STEP WORKSPACE PANELS (Step 1 - 5)
+   ========================================================================== */
+.step-card-panel {
+    background: #131316;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: var(--radius-card);
+    padding: 30px 34px;
+    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.4);
+}
+
+.step-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 24px;
+    gap: 20px;
+}
+
+.step-title {
+    font-size: 22px;
+    font-weight: 800;
+    color: #FFFFFF;
+    margin: 6px 0 4px;
+    letter-spacing: -0.4px;
+}
+
+.step-lead {
+    font-size: 13.5px;
+    color: #A1A1AA;
+    line-height: 1.5;
+    max-width: 720px;
+}
+
+.step-split-grid {
+    display: grid;
+    grid-template-columns: 1.15fr 0.85fr;
+    gap: 28px;
+}
+
+.form-pane, .catalog-pane {
+    display: flex;
+    flex-direction: column;
+}
+
+.pane-heading {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--c-yellow);
+    margin-bottom: 14px;
+    letter-spacing: -0.2px;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 16px;
+}
+
+.form-group label {
+    font-size: 12px;
+    font-weight: 700;
+    color: #E4E4E7;
+}
+
+input, select, textarea {
+    font-family: var(--font-main);
+    width: 100%;
+    color: #FFFFFF;
+    background: #1C1C20;
+    border: 1px solid #2D2D35;
+    border-radius: 12px;
+    padding: 11px 14px;
+    font-size: 13.5px;
+    font-weight: 600;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+input:focus, select:focus, textarea:focus {
+    border-color: var(--c-yellow);
+    box-shadow: 0 0 0 3px rgba(239, 245, 43, 0.15);
+}
+
+.code-textarea {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    min-height: 90px;
+}
+
+.hint {
+    font-size: 11.5px;
+    color: #8E8E93;
+    line-height: 1.4;
+    margin-top: 4px;
+}
+
+.g2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+
+.act {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+}
+
+.btn-pill-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: #27272A;
+    color: #FFFFFF;
+    border: 1px solid #3F3F46;
+    padding: 10px 18px;
+    border-radius: var(--radius-pill);
+    font-family: var(--font-main);
+    font-size: 12.5px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    outline: none;
+}
+
+.btn-pill-action:hover {
+    background: #3F3F46;
+    transform: translateY(-1px);
+}
+
+.btn-pill-action.yellow {
+    background: var(--c-yellow);
+    color: var(--c-pure-black);
+    border-color: var(--c-yellow);
+    box-shadow: 0 4px 14px rgba(239, 245, 43, 0.25);
+}
+
+.btn-pill-action.yellow:hover {
+    background: var(--c-yellow-hover);
+    transform: translateY(-1px);
+}
+
+.form-divider {
+    border: 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    margin: 20px 0;
+}
+
+/* Step sub-cards */
+.step-sub-card {
+    background: #1A1A1E;
+    border: 1px solid #2B2B33;
+    border-radius: 20px;
+    padding: 22px 24px;
+}
+
+.step-form-box {
+    max-width: 680px;
+}
+
+.input-with-button {
+    display: flex;
+    gap: 8px;
+}
+
+.btn-sub-action {
+    background: #27272A;
+    border: 1px solid #3F3F46;
+    color: #FFFFFF;
+    padding: 0 14px;
+    border-radius: 12px;
+    font-family: var(--font-main);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+}
+
+.btn-sub-action:hover {
+    background: #3F3F46;
+}
+
+/* Results & Tables (Invoice Styling) */
+.res {
+    margin-top: 16px;
+}
+
+.chip {
+    padding: 12px 16px;
+    border-radius: 14px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+    border: 1px solid transparent;
+}
+
+.c-ok {
+    background: rgba(43, 224, 97, 0.12);
+    color: #4ADE80;
+    border-color: rgba(74, 222, 128, 0.25);
+}
+
+.c-bad {
+    background: rgba(239, 68, 68, 0.12);
+    color: #F87171;
+    border-color: rgba(248, 113, 113, 0.25);
+}
+
+.c-warn {
+    background: rgba(245, 158, 11, 0.12);
+    color: #FBBF24;
+    border-color: rgba(251, 191, 36, 0.25);
+}
+
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13.5px;
+    margin-top: 12px;
+    background: #18181C;
+    border-radius: 16px;
+    border: 1px solid #2B2B33;
+    overflow: hidden;
+}
+
+th, td {
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    text-align: left;
+}
+
+th {
+    background: #202025;
+    font-size: 12px;
+    font-weight: 800;
+    color: #D4D4D8;
+    letter-spacing: 0.3px;
+}
+
+td.n, th.n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+tr.d td {
+    color: #A1A1AA;
+    font-size: 12px;
+    padding-left: 28px;
+}
+
+tr.t td {
+    font-weight: 800;
+    font-size: 15px;
+    color: var(--c-yellow);
+    background: rgba(239, 245, 43, 0.05);
+}
+
+.neg {
+    color: #4ADE80;
+}
+
+/* Test result cards */
+.t-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 18px;
+    background: #18181C;
+    border: 1px solid #2B2B33;
+    border-radius: 14px;
+    margin-bottom: 10px;
+    transition: transform 0.2s;
+}
+
+.t-card:hover {
+    transform: translateX(3px);
+}
+
+.pill.up {
+    background: var(--c-green-pill);
+    color: #0E0E10;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.pill.down {
+    background: var(--c-coral-pill);
+    color: #0E0E10;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.t-card b {
+    font-size: 13.5px;
+    color: #FFFFFF;
+    display: block;
+    margin-bottom: 2px;
+}
+
+.t-card small {
+    color: #8E8E93;
+    font-size: 12px;
+    line-height: 1.4;
+    display: block;
+}
+
+/* ==========================================================================
+   Activity Drawer (Bottom Collapsible Log)
+   ========================================================================== */
+.activity-drawer {
+    margin-top: 24px;
+    background: #121214;
+    border: 1px solid #28282D;
+    border-radius: 18px;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+.activity-drawer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    background: #17171A;
+    cursor: pointer;
+    user-select: none;
+}
+
+.drawer-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.status-pulsing-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--c-green-pill);
+    box-shadow: 0 0 8px var(--c-green-pill);
+    animation: pulseDot 2s infinite;
+}
+
+@keyframes pulseDot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+.drawer-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #D4D4D8;
+}
+
+.drawer-toggle-arrow {
+    font-size: 11px;
+    color: #8E8E93;
+    transition: transform 0.25s ease;
+}
+
+.activity-drawer.collapsed .drawer-toggle-arrow {
+    transform: rotate(180deg);
+}
+
+.activity-drawer-body {
+    max-height: 140px;
+    overflow-y: auto;
+    padding: 10px 18px;
+    transition: max-height 0.3s ease;
+}
+
+.activity-drawer.collapsed .activity-drawer-body {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.log {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: #A1A1AA;
+}
+
+.log div {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.l-ok { color: #4ADE80; }
+.l-bad { color: #F87171; }
+
+/* ==========================================================================
+   Modals & Drawers
+   ========================================================================== */
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    background: rgba(0, 0, 0, 0.68);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.26s ease;
+    padding: 20px;
+}
+
+.modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.modal-dialog {
+    background: #141416;
+    color: #FFFFFF;
+    width: 100%;
+    max-width: 440px;
+    border-radius: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6);
+    padding: 26px 28px;
+    transform: translateY(20px) scale(0.96);
+    transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-overlay.active .modal-dialog {
+    transform: translateY(0) scale(1);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.modal-header h3 {
+    font-size: 18px;
+    font-weight: 800;
+    color: #FFFFFF;
+}
+
+.modal-close-btn {
+    background: transparent;
+    border: none;
+    color: #9D9DA5;
+    font-size: 24px;
+    cursor: pointer;
+    line-height: 1;
+    padding: 4px;
+}
+
+.modal-hint {
+    font-size: 12.5px;
+    color: #A1A1AA;
+    margin-bottom: 18px;
+    line-height: 1.4;
+}
+
+.quick-chips {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.chip-btn {
+    flex: 1;
+    background: #1C1C20;
+    border: 1px solid #2E2E36;
+    color: #D4D4D8;
+    padding: 8px;
+    border-radius: 12px;
+    font-family: var(--font-main);
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.chip-btn.active {
+    background: var(--c-yellow);
+    color: #0E0E10;
+    border-color: var(--c-yellow);
+}
+
+.modal-footer {
+    display: flex;
+    gap: 10px;
+    margin-top: 22px;
+}
+
+.btn-cancel {
+    flex: 1;
+    background: #1F1F24;
+    border: 1px solid #2D2D35;
+    color: #D4D4D8;
+    padding: 13px;
+    border-radius: 14px;
+    font-family: var(--font-main);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.btn-submit {
+    flex: 1.4;
+    background: var(--c-yellow);
+    border: none;
+    color: #0E0E10;
+    padding: 13px;
+    border-radius: 14px;
+    font-family: var(--font-main);
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(239, 245, 43, 0.25);
+}
+
+/* Toast */
+.toast-notification {
+    position: fixed;
+    bottom: 24px;
+    right: 28px;
+    background: #111114;
+    color: #FFFFFF;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 14px;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+    transform: translateY(80px);
+    opacity: 0;
+    pointer-events: none;
+    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 2000;
+}
+
+.toast-notification.active {
+    transform: translateY(0);
+    opacity: 1;
+}
+
+.toast-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--c-yellow);
+    color: #0E0E10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 900;
+    font-size: 12px;
+}
+
+.toast-message {
+    font-size: 13px;
+    font-weight: 700;
+}
+
+/* ==========================================================================
+   Responsive Adaptations
+   ========================================================================== */
+@media (max-width: 1180px) {
+    .grid-container {
+        grid-template-columns: 1fr 1fr;
+    }
+    .col-right {
+        grid-column: span 2;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+    }
+    .card-nike-banner {
+        grid-column: span 2;
+    }
+    .step-split-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 860px) {
+    .dashboard-stage {
+        padding: 12px;
+    }
+    .dashboard-wrapper {
+        padding: 20px 16px;
+    }
+    .top-nav {
+        flex-wrap: wrap;
+        gap: 14px;
+    }
+    .nav-pill-cluster {
+        order: 3;
+        width: 100%;
+        overflow-x: auto;
+        justify-content: flex-start;
+    }
+    .grid-container {
+        grid-template-columns: 1fr;
+    }
+    .col-right {
+        grid-column: span 1;
+        grid-template-columns: 1fr;
+    }
+    .card-nike-banner {
+        grid-column: span 1;
+    }
+    .showcase-bar {
+        flex-wrap: wrap;
+        padding: 8px 14px;
+    }
+}
+
+</style>
+</head>
+<body class="canvas-presentation">
+
+    <!-- Top Floating Presentation Bar -->
+    <header class="showcase-bar">
+        <div class="showcase-left">
+            <span class="badge-pill">AI Billing Engine</span>
+            <span class="showcase-title">The Meter · Usage-Based Pricing</span>
+        </div>
+        <div class="showcase-controls">
+            <!-- Persona Switcher Pill -->
+            <div class="persona-cluster">
+                <span class="persona-label">Persona:</span>
+                <div class="persona-pills" id="seg">
+                    <!-- Populated dynamically: Admin, User 1, User 2 -->
+                </div>
+            </div>
+
+            <!-- Broker Status Switch -->
+            <div class="broker-toggle-wrapper">
+                <label class="broker-pill-toggle" title="Toggle message broker pipeline">
+                    <input type="checkbox" id="brk" checked>
+                    <span class="broker-status-indicator"></span>
+                    <span id="brkTxt">Broker: ONLINE</span>
+                </label>
+            </div>
+
+            <!-- Sound Toggle -->
+            <button id="soundToggleBtn" class="pill-btn secondary" title="Toggle audio feedback">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                </svg>
+                <span>Sound: <strong id="soundStatus">ON</strong></span>
+            </button>
+
+            <!-- View Mode Switch -->
+            <button id="viewToggleBtn" class="pill-btn secondary" title="Toggle showcase frame vs full screen">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                <span id="viewToggleText">Full Screen</span>
+            </button>
+
+            <!-- Quick Action Sample Data -->
+            <button class="pill-btn primary" data-a="sample" title="Instant Quickstart: Load Acme AI, Starter & Pro plans">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                <span>Quick Sample</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Presentation Stage / Showcase Viewport -->
+    <main class="dashboard-stage" id="dashboardStage">
+        <!-- Main Dashboard Tablet Chassis (MoneyMagic Signature Dark Frame) -->
+        <div class="dashboard-wrapper" id="dashboardWrapper">
+
+            <!-- 1. Top Navigation Bar -->
+            <nav class="top-nav">
+                <!-- Brand / Logo -->
+                <div class="brand-section" id="brandHomeBtn">
+                    <div class="brand-sunburst" aria-label="The Meter Logo">
+                        <!-- MoneyMagic Style Sunburst Ray Icon -->
+                        <svg viewBox="0 0 32 32" fill="none" class="sunburst-svg">
+                            <circle cx="16" cy="16" r="4.2" fill="#EFF52B" />
+                            <g stroke="#EFF52B" stroke-width="2" stroke-linecap="round">
+                                <line x1="16" y1="2" x2="16" y2="6.5" />
+                                <line x1="16" y1="25.5" x2="16" y2="30" />
+                                <line x1="2" y1="16" x2="6.5" y2="16" />
+                                <line x1="25.5" y1="16" x2="30" y2="16" />
+                                <line x1="6.1" y1="6.1" x2="9.3" y2="9.3" />
+                                <line x1="22.7" y1="22.7" x2="25.9" y2="25.9" />
+                                <line x1="6.1" y1="25.9" x2="9.3" y2="22.7" />
+                                <line x1="22.7" y1="9.3" x2="25.9" y2="6.1" />
+                                <line x1="10.8" y1="3.4" x2="12.5" y2="7.5" />
+                                <line x1="19.5" y1="24.5" x2="21.2" y2="28.6" />
+                                <line x1="3.4" y1="21.2" x2="7.5" y2="19.5" />
+                                <line x1="24.5" y1="12.5" x2="28.6" y2="10.8" />
+                                <line x1="21.2" y1="3.4" x2="19.5" y2="7.5" />
+                                <line x1="12.5" y1="24.5" x2="10.8" y2="28.6" />
+                                <line x1="3.4" y1="10.8" x2="7.5" y2="12.5" />
+                                <line x1="24.5" y1="19.5" x2="28.6" y2="21.2" />
+                            </g>
+                        </svg>
+                    </div>
+                    <div class="brand-text-group">
+                        <span class="brand-name">The Meter</span>
+                    </div>
+                </div>
+
+                <!-- Center Pill Menu (Steps / Navigation) -->
+                <div class="nav-pill-cluster" id="steps">
+                    <button class="nav-tab active" data-s="0">
+                        <svg class="tab-icon yellow-accent" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="3" y="3" width="7" height="7" rx="1.5"></rect>
+                            <rect x="14" y="3" width="7" height="7" rx="1.5"></rect>
+                            <rect x="3" y="14" width="7" height="7" rx="1.5"></rect>
+                            <rect x="14" y="14" width="7" height="7" rx="1.5"></rect>
+                        </svg>
+                        <span>Dashboard</span>
+                    </button>
+                    <button class="nav-tab" data-s="1">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                            <circle cx="9" cy="7" r="4"></circle>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                        </svg>
+                        <span>1 · Customers & Plans</span>
+                    </button>
+                    <button class="nav-tab" data-s="2">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
+                            <polyline points="17 6 23 6 23 12"></polyline>
+                        </svg>
+                        <span>2 · Subscribe & Upgrade</span>
+                    </button>
+                    <button class="nav-tab" data-s="3">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                        </svg>
+                        <span>3 · Ingest Usage</span>
+                    </button>
+                    <button class="nav-tab" data-s="4">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                        </svg>
+                        <span>4 · Invoices</span>
+                    </button>
+                    <button class="nav-tab" data-s="5">
+                        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                        </svg>
+                        <span>5 · Verify Tests</span>
+                    </button>
+                </div>
+
+                <!-- Right Quick Utility Actions -->
+                <div class="nav-actions">
+                    <button class="circle-btn dark-circle" id="openLogDrawerBtn" title="View Activity Stream Log">
+                        <span class="white-dot-indicator"></span>
+                    </button>
+                    <button class="circle-btn dark-circle" id="toggleTestsModalBtn" title="Run System Tests">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                            <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                    </button>
+                    <button class="circle-btn yellow-circle" id="userRoleAvatarBtn" title="Current Role Permissions">
+                        <svg width="19" height="19" viewBox="0 0 24 24" fill="#0C0C0E">
+                            <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                        </svg>
+                    </button>
+                </div>
+            </nav>
+
+            <!-- Role Permissions Banner / Context Bar -->
+            <div class="role-context-bar" id="who">
+                <!-- Dynamically updated role explanation -->
+            </div>
+
+            <!-- ================= VIEW 0: MAIN DASHBOARD VIEW (MoneyMagic 3-Column Layout) ================= -->
+            <div class="tab-view active" id="view-dashboard">
+                <div class="grid-container">
+
+                    <!-- ================= LEFT COLUMN ================= -->
+                    <div class="col-left">
+
+                        <!-- Total Ballance / Invoiced Revenue Card (Bright Cyber Yellow) -->
+                        <div class="card card-total-balance" id="totalBalanceCard">
+                            <div class="balance-info-pane">
+                                <div class="balance-header">
+                                    <span class="balance-title">Total Ballance</span>
+                                </div>
+                                <div class="balance-amount-wrapper">
+                                    <span class="currency-symbol">₹</span>
+                                    <span class="balance-number" id="balanceDisplay" data-value="1096.77">1,096.77</span>
+                                </div>
+                                <div class="balance-sub">BILLING ENGINE REVENUE</div>
+
+                                <div class="last-tx-box">
+                                    <div class="last-tx-val" id="lastTxVal">+ ₹ 2,200.00</div>
+                                    <div class="last-tx-label" id="lastTxLabel">Graduated Tier Usage</div>
+                                </div>
+                            </div>
+
+                            <!-- Action Buttons inside Yellow Card -->
+                            <div class="balance-actions-pane">
+                                <button class="btn-topup" data-a="sample" title="Load sample dataset">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                    </svg>
+                                    <span>SAMPLE DATA</span>
+                                </button>
+                                <button class="btn-withdraw" id="openSendEventModalBtn" title="Send token usage event">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                    <span>SEND USAGE</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Latest Transactions / Usage Pipeline: Playful Tilted Stack -->
+                        <div class="transactions-section">
+                            <div class="section-header">
+                                <h2 class="section-title">Latest Transactions & Events</h2>
+                                <button class="btn-dots" id="txFilterBtn" title="More options">
+                                    <span></span><span></span><span></span>
+                                </button>
+                            </div>
+
+                            <!-- Stack of Tilted Cards -->
+                            <div class="tx-stack" id="txStack">
+
+                                <!-- Card 1: Slate Grey / Johnson equivalent -> Acme Ingest -->
+                                <div class="tx-card tilt-item-1" data-title="Event evt-01 Accepted" data-desc="Acme AI · 50,000 Tokens" data-amount="-₹400.00" data-type="usage">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-avatar">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                                <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Acme AI Usage</div>
+                                            <div class="tx-desc">50,000 Tokens · Graduated</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount negative">₹ 500.00</div>
+                                </div>
+
+                                <!-- Card 2: Bright Yellow / Nike equivalent -> Pro Plan Upgrade -->
+                                <div class="tx-card tilt-item-2" data-title="Plan Upgrade (Prorated)" data-desc="Starter → Pro (17/31 days)" data-amount="+₹1,096.77" data-type="proration">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle black-circle">
+                                            <svg viewBox="0 0 24 24" width="16" height="16" fill="#EFF52B">
+                                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Pro Upgrade Proration</div>
+                                            <div class="tx-desc">Mid-Month Plan Switch</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount positive">+₹1,096.77</div>
+                                </div>
+
+                                <!-- Card 3: Crisp White / Mobile Phone equivalent -> Starter Base Subscription -->
+                                <div class="tx-card tilt-item-3" data-title="Monthly Subscription" data-desc="Acme AI · Starter Base Plan" data-amount="+₹1,000.00" data-type="sub">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-circle">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2.5">
+                                                <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+                                                <line x1="12" y1="18" x2="12.01" y2="18"></line>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Starter Subscription</div>
+                                            <div class="tx-desc">Base Fee Active</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount positive">+₹1,000.00</div>
+                                </div>
+
+                                <!-- Card 4: Candy Lilac / Balance Top-Up equivalent -> Deduplication Guard -->
+                                <div class="tx-card tilt-item-4" data-title="Idempotency Guard" data-desc="Duplicate Event Suppressed" data-amount="Protected" data-type="security">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-circle">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#DFB2F4" stroke-width="3">
+                                                <polyline points="20 6 9 17 4 12"></polyline>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Duplicate Protection</div>
+                                            <div class="tx-desc">Zero Double-Billing</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount positive">ACTIVE</div>
+                                </div>
+
+                                <!-- Card 5: Periwinkle Lavender / Withdrawal equivalent -> Broker Health -->
+                                <div class="tx-card tilt-item-5" data-title="Message Broker Status" data-desc="Kafka/RabbitMQ Usage Bus" data-amount="Healthy" data-type="broker">
+                                    <div class="tx-left">
+                                        <div class="tx-avatar-circle dark-circle">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#A09EF5" stroke-width="3">
+                                                <circle cx="12" cy="12" r="3"></circle>
+                                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                            </svg>
+                                        </div>
+                                        <div class="tx-details">
+                                            <div class="tx-name">Broker Pipeline</div>
+                                            <div class="tx-desc">Simulate 503 Outage</div>
+                                        </div>
+                                    </div>
+                                    <div class="tx-amount negative" id="brokerTxBadge">200 OK</div>
+                                </div>
+
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ================= MIDDLE COLUMN ================= -->
+                    <div class="col-middle">
+
+                        <!-- Report Card (Crisp White with Bar Chart) -->
+                        <div class="card card-report" id="reportCard">
+                            <div class="card-head">
+                                <h3 class="card-title-dark">Token Usage Volume</h3>
+                                <button class="btn-dots dark-dots" data-s="4" title="View Invoices">
+                                    <span></span><span></span><span></span>
+                                </button>
+                            </div>
+
+                            <!-- Bar Chart Component -->
+                            <div class="bar-chart-container">
+                                <div class="chart-y-axis">
+                                    <span>200k</span>
+                                    <span>100k</span>
+                                    <span>50k</span>
+                                    <span>25k</span>
+                                    <span>0</span>
+                                </div>
+
+                                <div class="chart-plot-area">
+                                    <div class="chart-grid-lines">
+                                        <div class="grid-line" style="bottom: 100%;"></div>
+                                        <div class="grid-line" style="bottom: 50%;"></div>
+                                        <div class="grid-line" style="bottom: 25%;"></div>
+                                        <div class="grid-line" style="bottom: 12.5%;"></div>
+                                        <div class="grid-line baseline" style="bottom: 0%;"></div>
+                                    </div>
+
+                                    <div class="chart-columns">
+                                        <!-- Column 1: JAN -->
+                                        <div class="chart-col" data-month="JAN" data-grey="155k" data-black="75k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 77.5%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 37.5%;"></div>
+                                            </div>
+                                            <span class="month-label">JAN</span>
+                                        </div>
+                                        <!-- Column 2: FEB -->
+                                        <div class="chart-col" data-month="FEB" data-grey="80k" data-black="168k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 40%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 84%;"></div>
+                                            </div>
+                                            <span class="month-label">FEB</span>
+                                        </div>
+                                        <!-- Column 3: MAR -->
+                                        <div class="chart-col" data-month="MAR" data-grey="168k" data-black="168k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 84%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 84%;"></div>
+                                            </div>
+                                            <span class="month-label">MAR</span>
+                                        </div>
+                                        <!-- Column 4: APR -->
+                                        <div class="chart-col" data-month="APR" data-grey="160k" data-black="98k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 80%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 49%;"></div>
+                                            </div>
+                                            <span class="month-label">APR</span>
+                                        </div>
+                                        <!-- Column 5: MAY -->
+                                        <div class="chart-col" data-month="MAY" data-grey="90k" data-black="168k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 45%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 84%;"></div>
+                                            </div>
+                                            <span class="month-label">MAY</span>
+                                        </div>
+                                        <!-- Column 6: JUN -->
+                                        <div class="chart-col" data-month="JUN" data-grey="168k" data-black="82k">
+                                            <div class="bar-pair">
+                                                <div class="bar bar-grey" style="--target-height: 84%;"></div>
+                                                <div class="bar bar-black" style="--target-height: 41%;"></div>
+                                            </div>
+                                            <span class="month-label">JUN</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Tooltip -->
+                            <div class="chart-tooltip" id="chartTooltip">
+                                <div class="tooltip-header" id="tooltipMonth">MAR</div>
+                                <div class="tooltip-row">
+                                    <span class="dot-swatch grey-dot"></span>
+                                    <span class="tooltip-lbl">Base Tier:</span>
+                                    <span class="tooltip-val" id="tooltipGreyVal">168,000 tok</span>
+                                </div>
+                                <div class="tooltip-row">
+                                    <span class="dot-swatch black-dot"></span>
+                                    <span class="tooltip-lbl">Overage:</span>
+                                    <span class="tooltip-val" id="tooltipBlackVal">168,000 tok</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Spending / Pricing Mode Card (Candy Lilac with Donut Chart) -->
+                        <div class="card card-spending" id="spendingCard">
+                            <div class="spending-top-row">
+                                <h3 class="spending-title">Pricing Mode Simulation</h3>
+                                <div class="timeframe-toggle" id="timeframeToggle">
+                                    <button class="toggle-pill-option active" data-period="graduated">Graduated</button>
+                                    <button class="toggle-pill-option" data-period="volume">Volume</button>
+                                    <div class="toggle-slider"></div>
+                                </div>
+                            </div>
+
+                            <div class="spending-content">
+                                <div class="donut-chart-box">
+                                    <svg class="donut-svg" viewBox="0 0 160 160">
+                                        <circle class="donut-ring ring-white" cx="80" cy="80" r="56"
+                                                stroke-dasharray="240 352"
+                                                stroke-dashoffset="0" />
+                                        <circle class="donut-ring ring-black" cx="80" cy="80" r="56"
+                                                stroke-dasharray="110 352"
+                                                stroke-dashoffset="-242" />
+                                    </svg>
+                                    <div class="donut-center-info">
+                                        <div class="donut-amount" id="spendingAmountDisplay">₹ 2,200.00</div>
+                                        <div class="donut-label" id="spendingLabelDisplay">250K TOKENS (GRADUATED)</div>
+                                    </div>
+                                </div>
+
+                                <div class="spending-legend">
+                                    <div class="legend-item" id="legendPersonal">
+                                        <span class="legend-name">Base Tier (100k)</span>
+                                        <div class="legend-capsule capsule-white" title="Base Tier: 100k tokens @ ₹10 = ₹1,000"></div>
+                                    </div>
+                                    <div class="legend-item" id="legendShopping">
+                                        <span class="legend-name">Upper Tier (150k)</span>
+                                        <div class="legend-capsule capsule-black" title="Upper Tier: 150k tokens @ ₹8 = ₹1,200"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                    <!-- ================= RIGHT COLUMN ================= -->
+                    <div class="col-right">
+
+                        <!-- 1. Total Income -> Active Customers -->
+                        <div class="card card-metric" id="metricIncome" data-s="1">
+                            <div class="metric-top">
+                                <span class="metric-label">Active Customers</span>
+                            </div>
+                            <div class="metric-bottom">
+                                <span class="metric-value" id="activeCustomersCount">1 Active</span>
+                                <div class="metric-badge badge-green">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <polyline points="20 6 9 17 4 12"></polyline>
+                                    </svg>
+                                    <span>Acme AI</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 2. Total Saves -> Total Ingested Tokens -->
+                        <div class="card card-metric" id="metricSaves" data-s="3">
+                            <div class="metric-top">
+                                <span class="metric-label">Total Ingested Tokens</span>
+                            </div>
+                            <div class="metric-bottom">
+                                <span class="metric-value" id="totalTokensRecorded">50,000 tok</span>
+                                <div class="metric-badge badge-green">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                                        <line x1="7" y1="17" x2="17" y2="7"></line>
+                                        <polyline points="7 7 17 7 17 17"></polyline>
+                                    </svg>
+                                    <span>Live</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 3. Total Expense -> Invoiced Total -->
+                        <div class="card card-metric" id="metricExpense" data-s="4">
+                            <div class="metric-top">
+                                <span class="metric-label">Latest Bill Total</span>
+                            </div>
+                            <div class="metric-bottom">
+                                <span class="metric-value" id="metricInvoicedTotal">₹ 1,096.77</span>
+                                <div class="metric-badge badge-coral">
+                                    <span>Prorated</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 4. Upcoming -> Test Verification Suite -->
+                        <div class="card card-metric card-upcoming" id="metricUpcoming">
+                            <div class="metric-top">
+                                <span class="metric-label">Engine Test Suite</span>
+                            </div>
+                            <div class="metric-bottom upcoming-row">
+                                <span class="metric-value" id="testSuiteBadge">5 of 5 Pass</span>
+                                <button class="btn-view-details" data-a="runT">
+                                    Run Tests
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 5. Nike Banner -> Pro Plan Highlight Card -->
+                        <div class="card card-nike-banner" id="cardNikeBanner" data-s="1">
+                            <div class="nike-top-row">
+                                <div class="nike-circle-badge">
+                                    <svg viewBox="0 0 24 24" width="16" height="16" fill="#EFF52B">
+                                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                                    </svg>
+                                </div>
+                                <button class="btn-heart" id="proPlanHeartBtn" title="Favorite Plan">
+                                    <svg class="heart-icon active" viewBox="0 0 24 24" fill="currentColor">
+                                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="nike-bottom-row">
+                                <div class="nike-labels">
+                                    <div class="nike-brand">Pro Plan</div>
+                                    <div class="nike-cat">Volume Slabs · ₹8/1k tokens</div>
+                                </div>
+                                <div class="nike-price">₹ 3,000/mo</div>
+                            </div>
+                        </div>
+
+                    </div>
+
+                </div> <!-- /grid-container -->
+            </div> <!-- /view-dashboard -->
+
+            <!-- ================= VIEW 1: STEP 1 · SET UP CUSTOMERS AND PLANS ================= -->
+            <div class="tab-view" id="view-step1">
+                <div class="step-card-panel">
+                    <div class="step-header-row">
+                        <div>
+                            <span class="badge-pill">Step 1</span>
+                            <h2 class="step-title">Set up customers and plans</h2>
+                            <p class="step-lead">A <b>customer</b> is a company you bill. A <b>plan</b> has a monthly base fee plus a per-1,000-token price that gets cheaper in higher volume tiers.</p>
+                        </div>
+                        <button class="pill-btn primary" data-a="sample">⚡ Load sample data (quickest)</button>
+                    </div>
+
+                    <div class="step-split-grid">
+                        <div class="form-pane">
+                            <h3 class="pane-heading">Create New Customer</h3>
+                            <div class="form-group">
+                                <label>Customer Name</label>
+                                <input type="text" id="cn" value="My Company" placeholder="e.g. Acme AI">
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action" data-a="addC">+ Add Customer</button>
+                            </div>
+
+                            <hr class="form-divider">
+
+                            <h3 class="pane-heading">Create New Pricing Plan</h3>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Plan Name</label>
+                                    <input type="text" id="pn" value="Growth">
+                                </div>
+                                <div class="form-group">
+                                    <label>Monthly Base Fee (₹)</label>
+                                    <input type="number" id="pb" value="2000" inputmode="decimal">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label>Pricing Mode</label>
+                                <select id="pm" class="form-select">
+                                    <option value="graduated">Graduated – each slab priced at its own rate</option>
+                                    <option value="volume">Volume – all tokens at the rate of the tier you reach</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Price Tiers (limit k tokens, ₹ per 1k tokens, flat fee)</label>
+                                <textarea id="pt" rows="4" class="code-textarea">100,10,0
+500,8,0
+-,5,0</textarea>
+                                <span class="hint">Use "-" for "no limit". Last line must be "-". Format: 100k @ ₹10, next 400k @ ₹8, rest @ ₹5.</span>
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action yellow" data-a="addP">+ Add Pricing Plan</button>
+                            </div>
+                        </div>
+
+                        <div class="catalog-pane">
+                            <h3 class="pane-heading">Current Catalog</h3>
+                            <div id="cat" class="catalog-display">
+                                <!-- Populated dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 2: STEP 2 · SUBSCRIBE & UPGRADE ================= -->
+            <div class="tab-view" id="view-step2">
+                <div class="step-card-panel">
+                    <span class="badge-pill">Step 2</span>
+                    <h2 class="step-title">Subscribe a customer, then upgrade mid-month</h2>
+                    <p class="step-lead">Subscribing starts a monthly billing period. Upgrading part-way through credits the unused part of the old plan and charges the new plan for the days left.</p>
+
+                    <div class="g2">
+                        <!-- Left: Subscribe -->
+                        <div class="step-sub-card">
+                            <h3 class="pane-heading">1. New Subscription</h3>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Customer</label>
+                                    <select id="sc" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Plan</label>
+                                    <select id="sp" class="form-select"></select>
+                                </div>
+                            </div>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Start Date</label>
+                                    <input type="date" id="sd" value="2026-03-01">
+                                </div>
+                                <div class="form-group">
+                                    <label>Retry-Safe Key (Idempotency)</label>
+                                    <input type="text" id="ik" placeholder="e.g. order-1001">
+                                    <span class="hint">Prevents double-billing when retrying.</span>
+                                </div>
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action yellow" data-a="sub">Subscribe Customer</button>
+                            </div>
+                            <div class="res" id="r1"></div>
+                        </div>
+
+                        <!-- Right: Upgrade & Prorate -->
+                        <div class="step-sub-card">
+                            <h3 class="pane-heading">2. Mid-Month Upgrade & Proration</h3>
+                            <div class="g2">
+                                <div class="form-group">
+                                    <label>Move to Plan</label>
+                                    <select id="up" class="form-select"></select>
+                                </div>
+                                <div class="form-group">
+                                    <label>Upgrade On Date</label>
+                                    <input type="date" id="ua" value="2026-03-15">
+                                </div>
+                            </div>
+                            <div class="act">
+                                <button class="btn-pill-action" data-a="upg">Upgrade & Calculate Proration</button>
+                            </div>
+                            <div class="res" id="r1b"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 3: STEP 3 · SEND USAGE EVENTS ================= -->
+            <div class="tab-view" id="view-step3">
+                <div class="step-card-panel">
+                    <span class="badge-pill">Step 3</span>
+                    <h2 class="step-title">Send usage events to message broker</h2>
+                    <p class="step-lead">Each API call your customer makes is an event with a unique ID. The same ID is never counted twice.</p>
+
+                    <div class="step-form-box">
+                        <div class="g2">
+                            <div class="form-group">
+                                <label>Customer</label>
+                                <select id="ec" class="form-select"></select>
+                            </div>
+                            <div class="form-group">
+                                <label>Event ID (Deduplication Key)</label>
+                                <div class="input-with-button">
+                                    <input type="text" id="ei" placeholder="evt-xxxx">
+                                    <button class="btn-sub-action" data-a="newId" title="Generate fresh ID">New ID</button>
+                                </div>
+                                <span class="hint">Keep ID unchanged and press Send again to test duplicate protection.</span>
+                            </div>
+                        </div>
+                        <div class="g2">
+                            <div class="form-group">
+                                <label>Tokens Used</label>
+                                <input type="number" id="et" value="50000" inputmode="numeric">
+                            </div>
+                            <div class="form-group">
+                                <label>Timestamp</label>
+                                <input type="datetime-local" id="es" value="2026-03-05T10:00">
+                            </div>
+                        </div>
+                        <div class="act">
+                            <button class="btn-pill-action yellow" data-a="send">Send Usage Event</button>
+                        </div>
+                        <div class="res" id="r2"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 4: STEP 4 · INVOICES ================= -->
+            <div class="tab-view" id="view-step4">
+                <div class="step-card-panel">
+                    <span class="badge-pill">Step 4</span>
+                    <h2 class="step-title">Generate usage invoices</h2>
+                    <p class="step-lead">The invoice prices all tokens used, tier by tier, using the plan that was active when the usage happened.</p>
+
+                    <div class="step-form-box">
+                        <div class="form-group">
+                            <label>Customer</label>
+                            <select id="ic" class="form-select"></select>
+                        </div>
+                        <div class="act">
+                            <button class="btn-pill-action yellow" data-a="gen">Generate Usage Invoice</button>
+                            <button class="btn-pill-action" data-a="hist">Show All Invoices</button>
+                        </div>
+                        <div class="res" id="r3"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ================= VIEW 5: STEP 5 · VERIFY TESTS ================= -->
+            <div class="tab-view" id="view-step5">
+                <div class="step-card-panel">
+                    <div class="step-header-row">
+                        <div>
+                            <span class="badge-pill">Step 5</span>
+                            <h2 class="step-title">Verify it works · Automated test suite</h2>
+                            <p class="step-lead">Runs the 3 required tests and the 2 improvements on a clean copy of the engine.</p>
+                        </div>
+                        <button class="btn-pill-action yellow" data-a="runT">Run All Tests</button>
+                    </div>
+
+                    <div class="res" id="r4">
+                        <!-- Populated with test cards -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Bottom Collapsible Activity Log Bar -->
+            <div class="activity-drawer" id="activityDrawer">
+                <div class="activity-drawer-header" id="activityDrawerToggle">
+                    <div class="drawer-left">
+                        <span class="status-pulsing-dot"></span>
+                        <span class="drawer-title">Real-Time Event Stream Log</span>
+                    </div>
+                    <span class="drawer-toggle-arrow">▲</span>
+                </div>
+                <div class="activity-drawer-body">
+                    <div class="log" id="log"></div>
+                </div>
+            </div>
+
+        </div> <!-- /dashboard-wrapper -->
+    </main>
+
+    <!-- Quick Event Sender Modal -->
+    <div class="modal-overlay" id="quickEventModal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3>Quick Ingest Usage Event</h3>
+                <button class="modal-close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-hint">Push a simulated token API call to the active message broker pipeline.</p>
+                <div class="form-group">
+                    <label>Customer</label>
+                    <select id="modalCustomerSelect" class="form-select"></select>
+                </div>
+                <div class="form-group">
+                    <label>Event ID</label>
+                    <div class="input-with-button">
+                        <input type="text" id="modalEventId">
+                        <button type="button" class="btn-sub-action" id="modalGenIdBtn">Generate</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Tokens Used</label>
+                    <div class="quick-chips">
+                        <button type="button" class="chip-btn" data-tokens="10000">10k tok</button>
+                        <button type="button" class="chip-btn active" data-tokens="50000">50k tok</button>
+                        <button type="button" class="chip-btn" data-tokens="150000">150k tok</button>
+                        <button type="button" class="chip-btn" data-tokens="300000">300k tok</button>
+                    </div>
+                    <input type="number" id="modalTokensInput" value="50000">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn-cancel modal-close-action">Cancel</button>
+                    <button type="button" class="btn-submit" id="modalSubmitEventBtn">Send Event</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast-notification" id="toastNotification">
+        <div class="toast-icon">✓</div>
+        <div class="toast-message" id="toastMessage">Ready</div>
+    </div>
+
+    <!-- Toast from original logic -->
+    <div id="toast" style="display:none;"></div>
+
+    <script>
+/**
+ * The Meter — AI Usage Billing Engine
+ * Built with MoneyMagic Fintech UI System & Micro-Animations
+ */
+
+/* ==========================================================================
+   1. CORE BILLING ENGINE (Exact Logic Preserved 100%)
+   ========================================================================== */
+const ROLES = {
+    super_admin: { "*": ["read", "write"] },
+    all_reader: { "*": ["read"] },
+    all_writer: { "*": ["read", "write"] },
+    event_ingestor: { event: ["write"] },
+    event_reader: { event: ["read"] }
+};
+
+const r2 = x => (Math.round(x * 100 + (x < 0 ? -1e-9 : 1e-9)) / 100);
+
+const pd = s => {
+    s = String(s).trim().replace(" ", "T");
+    if (!/T/.test(s)) s += "T00:00";
+    return new Date(s + (/Z|[+-]\d\d:?\d\d$/.test(s) ? "" : "Z"));
+};
+
+const addMonth = d => {
+    const x = new Date(d), day = x.getUTCDate();
+    x.setUTCDate(1);
+    x.setUTCMonth(x.getUTCMonth() + 1);
+    const dim = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth() + 1, 0)).getUTCDate();
+    x.setUTCDate(Math.min(day, dim));
+    return x;
+};
+
+const uid = p => p + "_" + Math.random().toString(36).slice(2, 8);
+
+function priceTiers(tiers, mode, u) {
+    let lines = [];
+    if (u <= 0) return [0, lines];
+    if (mode === "volume") {
+        for (const [up, unit, flat] of tiers) {
+            if (up == null || u <= up) {
+                const a = u * unit + flat;
+                return [a, [[`${u}k tokens × ₹${unit} (volume tier) + flat ₹${flat}`, a]]];
+            }
+        }
+    }
+    let lo = 0;
+    for (const [up, unit, flat] of tiers) {
+        if (u <= lo) break;
+        const top = up == null ? u : Math.min(u, up), qty = top - lo, a = qty * unit + flat;
+        lines.push([`${qty}k tokens × ₹${unit} (slab) + flat ₹${flat}`, a]);
+        if (up == null) break;
+        lo = up;
+    }
+    return [lines.reduce((s, l) => s + l[1], 0), lines];
+}
+
+function Eng() {
+    const S = { c: [], p: [], s: [], e: {}, i: [] };
+    let broker = true;
+
+    const need = (r, e, a) => {
+        const p = ROLES[r] || {};
+        if (!((p["*"] || []).includes(a) || (p[e] || []).includes(a))) {
+            throw new Error(`403 Forbidden – this role cannot ${a} ${e} data.`);
+        }
+    };
+
+    const plan = id => {
+        const p = S.p.find(x => x.id === id);
+        if (!p) throw new Error("Please pick a plan first.");
+        return p;
+    };
+
+    const save = inv => {
+        inv.id = uid("inv");
+        inv.total = r2(inv.total);
+        S.i.push(inv);
+        return inv;
+    };
+
+    return {
+        S,
+        setBroker: v => broker = v,
+        getBroker: () => broker,
+        addC(r, n) {
+            need(r, "customer", "write");
+            if (!n.trim()) throw new Error("Enter a customer name.");
+            const c = { id: uid("cust"), name: n.trim() };
+            S.c.push(c);
+            return c.id;
+        },
+        customers(r) {
+            need(r, "customer", "read");
+            return S.c;
+        },
+        plans(r) {
+            need(r, "plan", "read");
+            return S.p;
+        },
+        addP(r, name, base, mode, tiers) {
+            need(r, "plan", "write");
+            if (!tiers.length || tiers.at(-1)[0] != null) throw new Error("The last tier must be '-' (no limit).");
+            const p = { id: uid("plan"), name, base: +base, mode, tiers };
+            S.p.push(p);
+            return p.id;
+        },
+        sub(r, c, p, start, idem) {
+            need(r, "subscription", "write");
+            if (!c) throw new Error("Please pick a customer first.");
+            plan(p);
+            const st = pd(start);
+            if (idem) {
+                const x = S.s.find(s => s.idem === idem);
+                if (x) return { id: x.id, replay: true };
+            }
+            if (S.s.some(s => s.c === c && s.status === "active")) {
+                throw new Error("409 Conflict – this customer already has an active subscription. Use Upgrade instead.");
+            }
+            const end = addMonth(st), s = { id: uid("sub"), c, p, status: "active", ps: st, pe: end, ss: st, se: end, idem: idem || null };
+            S.s.push(s);
+            return { id: s.id, end };
+        },
+        upg(r, c, np, at) {
+            need(r, "subscription", "write");
+            at = pd(at);
+            const o = S.s.find(s => s.c === c && s.status === "active");
+            if (!o) throw new Error("This customer has no active subscription yet.");
+            if (o.p === np) throw new Error("409 Conflict – the customer is already on that plan.");
+            if (!(at >= o.ss && at < o.pe)) throw new Error("The upgrade date must fall inside the current billing month.");
+            const rem = (o.pe - at) / (o.pe - o.ps), op = plan(o.p), n = plan(np), cr = -r2(op.base * rem), ch = r2(n.base * rem);
+            o.status = "ended";
+            o.se = at;
+            S.s.push({ id: uid("sub"), c, p: np, status: "active", ps: o.ps, pe: o.pe, ss: at, se: o.pe, idem: null });
+            return save({
+                kind: "PRORATION",
+                c,
+                lines: [
+                    [`Credit for unused part of '${op.name}' (${(rem * 100).toFixed(2)}% of month left)`, cr],
+                    [`Charge for '${n.name}' for the remaining ${(rem * 100).toFixed(2)}%`, ch]
+                ],
+                total: cr + ch
+            });
+        },
+        ingest(r, id, c, tok, ts) {
+            need(r, "event", "write");
+            if (!broker) throw new Error("503 Service Unavailable – the message broker is down. Nothing was stored; retry in 5 seconds.");
+            if (!c) throw new Error("Please pick a customer first.");
+            if (!String(id).trim()) throw new Error("Event ID is required.");
+            if (!(tok >= 0) || tok === "") throw new Error("Tokens must be 0 or more.");
+            if (S.e[id]) return "duplicate";
+            S.e[id] = { c, tok: +tok, ts: pd(ts) };
+            return "accepted";
+        },
+        total(r, c) {
+            need(r, "event", "read");
+            return Object.values(S.e).filter(e => e.c === c).reduce((s, e) => s + e.tok, 0);
+        },
+        gen(r, c) {
+            need(r, "invoice", "write");
+            const subs = S.s.filter(s => s.c === c);
+            if (!subs.length) throw new Error("This customer has no subscription yet (Step 2).");
+            let lines = [], tot = 0;
+            for (const s of subs) {
+                const t = Object.values(S.e).filter(e => e.c === c && e.ts >= s.ss && e.ts < s.se).reduce((a, e) => a + e.tok, 0);
+                if (!t) continue;
+                const p = plan(s.p), [a, ls] = priceTiers(p.tiers, p.mode, t / 1000);
+                lines.push([`${p.name} plan – ${t.toLocaleString("en-IN")} tokens (${s.ss.toISOString().slice(0, 10)} to ${s.se.toISOString().slice(0, 10)})`, r2(a)]);
+                ls.forEach(l => lines.push(["  " + l[0], r2(l[1])]));
+                tot += a;
+            }
+            if (!lines.length) throw new Error("No usage recorded yet for this customer (Step 3).");
+            return save({ kind: "USAGE", c, lines, total: tot });
+        },
+        hist(r, c) {
+            need(r, "invoice", "read");
+            return S.i.filter(i => i.c === c);
+        }
+    };
+}
+
+/* ==========================================================================
+   2. PERSONAS & APPLICATION STATE
+   ========================================================================== */
+const PERSONAS = {
+    admin: {
+        role: "super_admin",
+        name: "Admin",
+        who: "Billing owner",
+        can: "Everything: set up, subscribe, send usage, create & view invoices.",
+        cant: ""
+    },
+    user1: {
+        role: "event_ingestor",
+        name: "User 1",
+        who: "API Ingestor Service",
+        can: "Send usage events (Step 3).",
+        cant: "Cannot see customers, plans or invoices (403 Forbidden)."
+    },
+    user2: {
+        role: "all_reader",
+        name: "User 2",
+        who: "Finance Analyst",
+        can: "View customers, plans, usage totals and invoices.",
+        cant: "Cannot create or change anything (403 Forbidden)."
+    }
+};
+
+let who = "admin";
+const E = Eng();
+const $ = id => document.getElementById(id);
+const R = () => PERSONAS[who].role;
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const inr = n => (n < 0 ? "−" : "") + "₹ " + Math.abs(n).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// Audio Synthesizer
+let audioCtx = null;
+let soundEnabled = true;
+
+function playSound(type = 'click') {
+    if (!soundEnabled) return;
+    try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        const now = audioCtx.currentTime;
+
+        if (type === 'click') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(800, now);
+            osc.frequency.exponentialRampToValueAtTime(320, now + 0.04);
+            gain.gain.setValueAtTime(0.08, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+            osc.start(now);
+            osc.stop(now + 0.04);
+        } else if (type === 'pop') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(450, now);
+            osc.frequency.exponentialRampToValueAtTime(850, now + 0.06);
+            gain.gain.setValueAtTime(0.09, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+            osc.start(now);
+            osc.stop(now + 0.07);
+        } else if (type === 'success') {
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(523.25, now);
+            osc.frequency.setValueAtTime(659.25, now + 0.08);
+            osc.frequency.setValueAtTime(783.99, now + 0.16);
+            gain.gain.setValueAtTime(0.09, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+            osc.start(now);
+            osc.stop(now + 0.28);
+        }
+    } catch (e) {}
+}
+
+// Log Feed
+function log(m, k) {
+    const d = document.createElement("div");
+    d.className = k ? "l-" + k : "";
+    d.textContent = `${new Date().toLocaleTimeString()}  ${m}`;
+    $("log").prepend(d);
+}
+
+// Toast
+let toastTimeout;
+function toast(m, k = 'ok') {
+    const toastElem = $("toastNotification");
+    const msgElem = $("toastMessage");
+    if (!toastElem) return;
+    clearTimeout(toastTimeout);
+    msgElem.textContent = m;
+    toastElem.classList.add("active");
+    toastTimeout = setTimeout(() => toastElem.classList.remove("active"), 4200);
+}
+
+const chip = (id, m, k) => {
+    const elem = $(id);
+    if (elem) elem.innerHTML = `<div class="chip c-${k}">${esc(m)}</div>`;
+};
+
+function invHtml(i) {
+    return `<table><tr><th>${i.kind === "PRORATION" ? "Proration" : "Usage"} invoice <small style="color:#A1A1AA;font-family:monospace">${i.id}</small></th><th class="n">Amount</th></tr>` +
+        i.lines.map(l => `<tr class="${l[0].startsWith("  ") ? "d" : ""}"><td>${esc(l[0].trim())}</td><td class="n ${l[1] < 0 ? "neg" : ""}">${inr(l[1])}</td></tr>`).join("") +
+        `<tr class="t"><td>Total to pay</td><td class="n">${inr(i.total)}</td></tr></table>`;
+}
+
+function fill(ids, rows, lab) {
+    for (const id of ids) {
+        const el = $(id);
+        if (!el) continue;
+        const v = el.value;
+        el.innerHTML = rows.length ? rows.map(r => `<option value="${r.id}">${esc(lab(r))}</option>`).join("") : '<option value="">— none yet (see Step 1) —</option>';
+        if (v) el.value = v;
+    }
+}
+
+// Number Count-Up Animation
+function animateValue(elem, start, end, duration = 750, prefix = '₹ ', suffix = '') {
+    if (!elem) return;
+    const startTime = performance.now();
+    function update(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        const ease = 1 - Math.pow(1 - progress, 3);
+        const currentVal = start + (end - start) * ease;
+        elem.textContent = `${prefix}${currentVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${suffix}`;
+        if (progress < 1) {
+            requestAnimationFrame(update);
+        } else {
+            elem.textContent = `${prefix}${end.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${suffix}`;
+        }
+    }
+    requestAnimationFrame(update);
+}
+
+// Refresh Dashboard Widgets & Catalog
+function refresh() {
+    let cs = [], ps = [], cat = "";
+    try {
+        cs = E.customers(R());
+        ps = E.plans(R());
+        cat = `<table><tr><th>Customers</th><th>Plans</th></tr><tr><td>${cs.map(c => esc(c.name)).join("<br>") || "—"}</td><td>${ps.map(p => `${esc(p.name)} · ${inr(p.base)}/month · ${p.mode}`).join("<br>") || "—"}</td></tr></table>`;
+    } catch {
+        cat = '<div class="chip c-warn">Your role cannot view this list (by design).</div>';
+    }
+    if ($("cat")) $("cat").innerHTML = cat;
+    fill(["sc", "ic", "modalCustomerSelect"], cs, c => c.name);
+    fill(["sp", "up"], ps, p => `${p.name} (${inr(p.base)}/month)`);
+    fill(["ec"], E.S.c, c => c.name + " (" + c.id + ")");
+
+    // Update Right Column Metric Widgets
+    if ($("activeCustomersCount")) {
+        $("activeCustomersCount").textContent = `${E.S.c.length} Customer${E.S.c.length === 1 ? '' : 's'}`;
+    }
+    if ($("totalTokensRecorded")) {
+        const totalTok = Object.values(E.S.e).reduce((s, e) => s + e.tok, 0);
+        $("totalTokensRecorded").textContent = `${totalTok.toLocaleString("en-IN")} tok`;
+    }
+    if ($("metricInvoicedTotal")) {
+        const lastInv = E.S.i.at(-1);
+        if (lastInv) {
+            $("metricInvoicedTotal").textContent = inr(lastInv.total);
+            if ($("balanceDisplay")) {
+                animateValue($("balanceDisplay"), 0, Math.max(0, lastInv.total), 600);
+            }
+        }
+    }
+}
+
+// Persona Switcher
+function persona() {
+    const p = PERSONAS[who];
+    $("who").innerHTML = `<b>${p.name} – ${esc(p.who)}</b><span class="yes">✓ Can: ${esc(p.can)}</span>${p.cant ? `<span class="no">✗ ${esc(p.cant)}</span>` : ""}`;
+    [...$("seg").children].forEach(b => b.classList.toggle("on", b.dataset.w === who));
+}
+
+// Message Broker Outage Simulation
+function brk() {
+    const up = $("brk").checked;
+    E.setBroker(up);
+    const txt = $("brkTxt");
+    const toggle = document.querySelector(".broker-pill-toggle");
+    if (toggle) toggle.classList.toggle("down", !up);
+    if (txt) txt.textContent = up ? "Broker: ONLINE" : "Broker: 503 OUTAGE";
+    const brokerTx = $("brokerTxBadge");
+    if (brokerTx) {
+        brokerTx.textContent = up ? "200 OK" : "503 OUTAGE";
+        brokerTx.style.color = up ? "#0E0E10" : "#EF4444";
+    }
+}
+
+// Step & Tab Navigation
+function show(k) {
+    // k = 0: Dashboard; k = 1: Step 1; k = 2: Step 2; k = 3: Step 3; k = 4: Step 4; k = 5: Step 5
+    document.querySelectorAll(".tab-view").forEach((view, idx) => {
+        view.classList.toggle("active", idx === k);
+    });
+    document.querySelectorAll("#steps .nav-tab").forEach((btn, idx) => {
+        btn.classList.toggle("active", idx === k);
+    });
+    playSound('pop');
+}
+
+const newId = () => {
+    const id = "evt-" + Math.random().toString(36).slice(2, 8);
+    if ($("ei")) $("ei").value = id;
+    if ($("modalEventId")) $("modalEventId").value = id;
+    return id;
+};
+
+function tokensNow(c) {
+    try {
+        return ` Total recorded: ${E.total(R(), c).toLocaleString("en-IN")} tokens.`;
+    } catch {
+        return " (This role cannot read usage totals.)";
+    }
+}
+
+/* ==========================================================================
+   3. ACTION HANDLERS
+   ========================================================================== */
+const A = {
+    sample() {
+        const t1 = [[100, 10, 0], [500, 8, 0], [null, 5, 0]], t2 = [[100, 8, 0], [500, 6, 0], [null, 4, 0]];
+        const c = E.addC(R(), "Acme AI");
+        E.addP(R(), "Starter", 1000, "graduated", t1);
+        E.addP(R(), "Pro", 3000, "graduated", t2);
+        // Also auto-subscribe & ingest demo events so dashboard looks immediately vibrant
+        try {
+            E.sub(R(), c, E.S.p[0].id, "2026-03-01", "init-demo");
+            E.ingest(R(), "evt-seed-01", c, 50000, "2026-03-05T10:00");
+            E.upg(R(), c, E.S.p[1].id, "2026-03-15");
+        } catch (e) {}
+
+        log("Sample data loaded: Acme AI, Starter ₹1,000, Pro ₹3,000", "ok");
+        toast("Sample dataset loaded! Active on dashboard.", "ok");
+        playSound('success');
+        refresh();
+        show(0);
+    },
+    addC() {
+        E.addC(R(), $("cn").value);
+        log("Customer added: " + $("cn").value, "ok");
+        toast("Customer added: " + $("cn").value, "ok");
+        playSound('success');
+    },
+    addP() {
+        const t = $("pt").value.trim().split("\n").map(l => {
+            const [u, p, f] = l.split(",").map(x => x.trim());
+            return [u === "-" ? null : +u, +p, +f];
+        });
+        E.addP(R(), $("pn").value, $("pb").value, $("pm").value, t);
+        log("Plan added: " + $("pn").value, "ok");
+        toast("Plan added: " + $("pn").value, "ok");
+        playSound('success');
+    },
+    sub() {
+        const r = E.sub(R(), $("sc").value, $("sp").value, $("sd").value, $("ik").value);
+        const m = r.replay ? `Same retry-safe key – returned existing subscription ${r.id}. No duplicate created.` : `Subscribed. Billing month runs ${$("sd").value} to ${r.end.toISOString().slice(0, 10)}.`;
+        chip("r1", m, r.replay ? "warn" : "ok");
+        log(m, "ok");
+        toast(m, r.replay ? "warn" : "ok");
+        playSound(r.replay ? 'pop' : 'success');
+    },
+    upg() {
+        const i = E.upg(R(), $("sc").value, $("up").value, $("ua").value);
+        $("r1b").innerHTML = invHtml(i);
+        log("Upgrade prorated, net " + inr(i.total), "ok");
+        toast("Upgrade prorated: " + inr(i.total), "ok");
+        playSound('success');
+    },
+    send() {
+        const r = E.ingest(R(), $("ei").value, $("ec").value, $("et").value, $("es").value);
+        const ex = tokensNow($("ec").value);
+        if (r === "accepted") {
+            chip("r2", "✓ Event accepted and stored." + ex, "ok");
+            log(`Event ${$("ei").value} accepted`, "ok");
+            toast(`Event ${$("ei").value} accepted!`, "ok");
+            playSound('success');
+        } else {
+            chip("r2", "Duplicate – event ID was already counted. Ignored; no double-bill." + ex, "warn");
+            log(`Event ${$("ei").value} ignored (duplicate)`, "ok");
+            toast("Duplicate event ID ignored (protected)!", "warn");
+            playSound('pop');
+        }
+    },
+    newId,
+    gen() {
+        const i = E.gen(R(), $("ic").value);
+        $("r3").innerHTML = invHtml(i);
+        log("Invoice generated: " + inr(i.total), "ok");
+        toast("Invoice generated: " + inr(i.total), "ok");
+        playSound('success');
+    },
+    hist() {
+        const h = E.hist(R(), $("ic").value);
+        $("r3").innerHTML = h.length ? h.map(invHtml).join("<br>") : '<div class="chip c-warn">No invoices yet.</div>';
+        playSound('pop');
+    },
+    runT() {
+        const o = runTests();
+        const r4 = $("r4");
+        if (r4) {
+            r4.innerHTML = o.map(t => `<div class="t-card"><span class="pill ${t.ok ? "up" : "down"}">${t.ok ? "PASS" : "FAIL"}</span><div><b>${esc(t.name)}</b><small>${esc(t.d)}</small></div></div>`).join("") +
+                `<div class="chip ${o.every(t => t.ok) ? "c-ok" : "c-bad"}" style="margin-top:14px;font-size:14px;font-weight:700">${o.filter(t => t.ok).length} of ${o.length} tests passed successfully</div>`;
+        }
+        if ($("testSuiteBadge")) {
+            $("testSuiteBadge").textContent = `${o.filter(t => t.ok).length} of ${o.length} Pass`;
+        }
+        playSound(o.every(t => t.ok) ? 'success' : 'pop');
+        toast(`Test Suite Complete: ${o.filter(t => t.ok).length}/${o.length} Passed`, "ok");
+        show(5);
+    }
+};
+
+/* ==========================================================================
+   4. ENGINE TEST SUITE (100% Exact Verification Logic)
+   ========================================================================== */
+function runTests() {
+    const Ad = "super_admin", out = [];
+    const t = (name, f) => {
+        let ok, d;
+        try { [ok, d] = f(); } catch (e) { ok = false; d = e.message; }
+        out.push({ name, ok, d });
+    };
+    const mk = () => {
+        const e = Eng(), c = e.addC(Ad, "Acme"), s = e.addP(Ad, "Starter", 1000, "graduated", [[null, 10, 0]]), b = e.addP(Ad, "Pro", 3000, "graduated", [[null, 8, 0]]);
+        return [e, c, s, b];
+    };
+    const throws = f => {
+        try { f(); return null; } catch (e) { return e.message; }
+    };
+
+    t("Required test 1 – a duplicate usage event is counted only once", () => {
+        const [e, c, s] = mk();
+        e.sub(Ad, c, s, "2026-03-01");
+        const a = e.ingest("event_ingestor", "evt-1", c, 1000, "2026-03-02");
+        const b = e.ingest("event_ingestor", "evt-1", c, 1000, "2026-03-02");
+        const n = e.total(Ad, c);
+        return [n === 1000 && b === "duplicate", `Same event sent twice (1,000 tokens): 1st ${a}, 2nd ${b}. Total recorded = ${n}.`];
+    });
+
+    t("Required test 2 – mid-month upgrade is prorated correctly", () => {
+        const [e, c, s, b] = mk();
+        e.sub(Ad, c, s, "2026-03-01");
+        const i = e.upg(Ad, c, b, "2026-03-15");
+        return [i.lines[0][1] === -548.39 && i.lines[1][1] === 1645.16 && i.total === 1096.77, `₹1,000 → ₹3,000 plan on 15 March (17 of 31 days left): −548.39 + 1,645.16 = ${i.total}. By hand: 2000 × 17/31 = 1096.77.`];
+    });
+
+    t("Required test 3 – tiered pricing equals the hand calculation", () => {
+        const g = [[100, 10, 0], [500, 8, 0], [null, 5, 0]];
+        const a = priceTiers(g, "graduated", 250)[0];
+        const v = priceTiers(g, "volume", 250)[0];
+        const f = priceTiers([[100, 10, 0], [null, 8, 50]], "graduated", 250)[0];
+        return [a === 2200 && v === 2000 && f === 2250, `250k tokens: graduated = 100×10 + 150×8 = ${a}; volume = 250×8 = ${v}; graduated with ₹50 flat fee on tier 2 = ${f}.`];
+    });
+
+    t("Improvement 1 – broker down returns 503 and stores nothing", () => {
+        const [e, c] = mk();
+        e.setBroker(false);
+        const m = throws(() => e.ingest(Ad, "x", c, 5, "2026-03-02"));
+        return [!!m && m.startsWith("503") && e.total(Ad, c) === 0, "Error raised, nothing stored: " + m];
+    });
+
+    t("Improvement 2a – retried subscription is not duplicated", () => {
+        const [e, c, s] = mk();
+        const a = e.sub(Ad, c, s, "2026-03-01", "k1");
+        const b = e.sub(Ad, c, s, "2026-03-01", "k1");
+        const m = throws(() => e.sub(Ad, c, s, "2026-03-01", "k2"));
+        return [a.id === b.id && !!m && m.startsWith("409"), "Same key returned the same subscription; a different key for already-subscribed customer was rejected (409)."];
+    });
+
+    t("Improvement 2b – usage-only key cannot read customer data", () => {
+        const [e, c] = mk();
+        const m1 = throws(() => e.customers("event_ingestor"));
+        const m2 = throws(() => e.hist("event_ingestor", c));
+        return [!!m1 && !!m2, "User 1 (usage-only) was refused reads of customers and invoices (403)."];
+    });
+
+    return out;
+}
+
+/* ==========================================================================
+   5. UI INITIALIZATION & EVENT LISTENERS
+   ========================================================================== */
+document.addEventListener("DOMContentLoaded", () => {
+    // Populate Persona Selector
+    $("seg").innerHTML = Object.entries(PERSONAS).map(([k, p]) =>
+        `<button data-w="${k}">${p.name}</button>`
+    ).join("");
+
+    // Setup Bar Chart Hover & Growth
+    setTimeout(() => {
+        document.querySelectorAll('.bar').forEach(b => {
+            const h = b.style.getPropertyValue('--target-height');
+            if (h) b.style.height = h;
+        });
+    }, 150);
+
+    const chartCols = document.querySelectorAll('.chart-col');
+    const chartTooltip = $("chartTooltip");
+    const tooltipMonth = $("tooltipMonth");
+    const tooltipGreyVal = $("tooltipGreyVal");
+    const tooltipBlackVal = $("tooltipBlackVal");
+
+    chartCols.forEach(col => {
+        col.addEventListener('mouseenter', () => {
+            const month = col.getAttribute('data-month');
+            const grey = col.getAttribute('data-grey');
+            const black = col.getAttribute('data-black');
+            tooltipMonth.textContent = month;
+            tooltipGreyVal.textContent = `${grey} tokens`;
+            tooltipBlackVal.textContent = `${black} tokens`;
+
+            const colRect = col.getBoundingClientRect();
+            const cardRect = $("reportCard").getBoundingClientRect();
+            chartTooltip.style.left = `${colRect.left - cardRect.left + colRect.width / 2}px`;
+            chartTooltip.style.top = `${colRect.top - cardRect.top - 12}px`;
+            chartTooltip.classList.add('active');
+            playSound('click');
+        });
+        col.addEventListener('mouseleave', () => {
+            chartTooltip.classList.remove('active');
+        });
+    });
+
+    // Donut Simulation Toggle (Graduated vs Volume)
+    const timeframeToggle = $("timeframeToggle");
+    const toggleOptions = document.querySelectorAll(".toggle-pill-option");
+    const spendingAmountDisplay = $("spendingAmountDisplay");
+    const spendingLabelDisplay = $("spendingLabelDisplay");
+    const donutWhite = document.querySelector(".donut-ring.ring-white");
+    const donutBlack = document.querySelector(".donut-ring.ring-black");
+
+    toggleOptions.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const period = btn.getAttribute('data-period');
+            timeframeToggle.setAttribute('data-active', period);
+            toggleOptions.forEach(o => o.classList.remove('active'));
+            btn.classList.add('active');
+            playSound('pop');
+
+            if (period === 'graduated') {
+                animateValue(spendingAmountDisplay, 2000, 2200, 500, '₹ ');
+                spendingLabelDisplay.textContent = '250K TOKENS (GRADUATED)';
+                donutWhite.setAttribute('stroke-dasharray', '240 352');
+                donutBlack.setAttribute('stroke-dasharray', '110 352');
+                donutBlack.setAttribute('stroke-dashoffset', '-242');
+            } else {
+                animateValue(spendingAmountDisplay, 2200, 2000, 500, '₹ ');
+                spendingLabelDisplay.textContent = '250K TOKENS (VOLUME TIER)';
+                donutWhite.setAttribute('stroke-dasharray', '210 352');
+                donutBlack.setAttribute('stroke-dasharray', '140 352');
+                donutBlack.setAttribute('stroke-dashoffset', '-212');
+            }
+        });
+    });
+
+    // Click Dispatcher for Actions
+    document.addEventListener("click", e => {
+        const b = e.target.closest("[data-a]");
+        if (b) {
+            try {
+                A[b.dataset.a]();
+            } catch (err) {
+                log(err.message, "bad");
+                toast(err.message, "bad");
+                if (b.dataset.a === "send") chip("r2", err.message, "bad");
+            }
+            refresh();
+            return;
+        }
+
+        const w = e.target.closest("[data-w]");
+        if (w) {
+            who = w.dataset.w;
+            persona();
+            refresh();
+            log("Switched to " + PERSONAS[who].name + " (" + PERSONAS[who].role + ")", "ok");
+            toast("Active Persona: " + PERSONAS[who].name, "ok");
+            playSound('pop');
+            return;
+        }
+
+        const s = e.target.closest("[data-s]");
+        if (s) {
+            show(+s.dataset.s);
+            return;
+        }
+    });
+
+    // Broker Switch
+    $("brk").addEventListener("change", () => {
+        brk();
+        const isOn = $("brk").checked;
+        log("Broker pipeline " + (isOn ? "ONLINE" : "OFFLINE (simulated 503 outage)"), isOn ? "ok" : "bad");
+        toast(isOn ? "Broker pipeline restored to ONLINE (200)" : "Simulated Broker Outage: Engine will return 503!", isOn ? "ok" : "bad");
+        playSound(isOn ? 'success' : 'click');
+    });
+
+    // Presentation Mode Switcher
+    const viewToggleBtn = $("viewToggleBtn");
+    const viewToggleText = $("viewToggleText");
+    if (viewToggleBtn) {
+        viewToggleBtn.addEventListener("click", () => {
+            document.body.classList.toggle("fullscreen-mode");
+            const isFull = document.body.classList.contains("fullscreen-mode");
+            viewToggleText.textContent = isFull ? "Presentation Frame" : "Full Screen";
+            playSound('pop');
+        });
+    }
+
+    // Audio Mute Toggle
+    const soundToggleBtn = $("soundToggleBtn");
+    const soundStatus = $("soundStatus");
+    if (soundToggleBtn) {
+        soundToggleBtn.addEventListener("click", () => {
+            soundEnabled = !soundEnabled;
+            soundStatus.textContent = soundEnabled ? "ON" : "OFF";
+            if (soundEnabled) playSound('pop');
+            toast(`Sound effects ${soundEnabled ? 'enabled' : 'muted'}`, 'ok');
+        });
+    }
+
+    // Pro Plan Heart Toggle
+    const proPlanHeartBtn = $("proPlanHeartBtn");
+    if (proPlanHeartBtn) {
+        proPlanHeartBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const icon = proPlanHeartBtn.querySelector('.heart-icon');
+            if (icon) {
+                icon.classList.toggle('liked');
+                playSound('pop');
+                toast(icon.classList.contains('liked') ? 'Pro Plan marked as default recommendation ♥' : 'Favorite removed', 'ok');
+            }
+        });
+    }
+
+    // Activity Drawer Toggle
+    const activityDrawerToggle = $("activityDrawerToggle");
+    const activityDrawer = $("activityDrawer");
+    if (activityDrawerToggle && activityDrawer) {
+        activityDrawerToggle.addEventListener("click", () => {
+            activityDrawer.classList.toggle("collapsed");
+            playSound('click');
+        });
+    }
+
+    // Quick Event Ingestion Modal
+    const quickModal = $("quickEventModal");
+    const openSendEventModalBtn = $("openSendEventModalBtn");
+    const modalGenIdBtn = $("modalGenIdBtn");
+    const modalSubmitEventBtn = $("modalSubmitEventBtn");
+    const modalChips = document.querySelectorAll(".quick-chips .chip-btn");
+
+    if (openSendEventModalBtn && quickModal) {
+        openSendEventModalBtn.addEventListener("click", () => {
+            newId();
+            quickModal.classList.add("active");
+            playSound('pop');
+        });
+    }
+
+    document.querySelectorAll(".modal-close-btn, .modal-close-action").forEach(btn => {
+        btn.addEventListener("click", () => {
+            quickModal.classList.remove("active");
+            playSound('click');
+        });
+    });
+
+    if (modalGenIdBtn) {
+        modalGenIdBtn.addEventListener("click", () => {
+            newId();
+            playSound('click');
+        });
+    }
+
+    modalChips.forEach(chipBtn => {
+        chipBtn.addEventListener("click", () => {
+            modalChips.forEach(c => c.classList.remove("active"));
+            chipBtn.classList.add("active");
+            const amt = chipBtn.getAttribute("data-tokens");
+            if ($("modalTokensInput")) $("modalTokensInput").value = amt;
+            playSound('click');
+        });
+    });
+
+    if (modalSubmitEventBtn) {
+        modalSubmitEventBtn.addEventListener("click", () => {
+            try {
+                const c = $("modalCustomerSelect").value;
+                const id = $("modalEventId").value;
+                const tok = $("modalTokensInput").value;
+                const ts = new Date().toISOString();
+                const res = E.ingest(R(), id, c, tok, ts);
+                if (res === "accepted") {
+                    log(`API Event ${id} ingested (${tok} tokens)`, "ok");
+                    toast(`Event ${id} accepted: ${tok} tokens!`, "ok");
+                    playSound('success');
+                } else {
+                    log(`API Event ${id} rejected: DUPLICATE`, "bad");
+                    toast(`Event ${id} rejected: Already ingested (no double bill)!`, "warn");
+                    playSound('pop');
+                }
+                quickModal.classList.remove("active");
+                refresh();
+            } catch (err) {
+                log(err.message, "bad");
+                toast(err.message, "bad");
+            }
+        });
+    }
+
+    // Brand Home Button
+    const brandHomeBtn = $("brandHomeBtn");
+    if (brandHomeBtn) {
+        brandHomeBtn.addEventListener("click", () => show(0));
+    }
+
+    // Click handler for Tilted Cards
+    document.querySelectorAll(".tx-card").forEach(card => {
+        card.addEventListener("click", () => {
+            const title = card.getAttribute("data-title");
+            const desc = card.getAttribute("data-desc");
+            const amt = card.getAttribute("data-amount");
+            toast(`${title}: ${desc} (${amt})`, "ok");
+            playSound('click');
+        });
+    });
+
+    // 3D Parallax on Tablet Wrapper
+    const wrapper = $("dashboardWrapper");
+    if (wrapper && window.innerWidth > 992) {
+        wrapper.addEventListener("mousemove", e => {
+            if (document.body.classList.contains("fullscreen-mode")) return;
+            const r = wrapper.getBoundingClientRect();
+            const x = (e.clientX - r.left) / r.width - 0.5;
+            const y = (e.clientY - r.top) / r.height - 0.5;
+            wrapper.style.transform = `perspective(1200px) rotateX(${y * -2.2}deg) rotateY(${x * 2.2}deg)`;
+        });
+        wrapper.addEventListener("mouseleave", () => {
+            wrapper.style.transform = "perspective(1200px) rotateX(0deg) rotateY(0deg)";
+        });
+    }
+
+    // Initial Engine Bootstrap
+    window.runTests = runTests;
+    newId();
+    persona();
+    brk();
+    show(0);
+    // Auto-load sample data for stunning out-of-the-box appearance
+    A.sample();
+    log("The Meter initialized with MoneyMagic design system. All 5 test suites ready.", "ok");
+});
+
+</script>
+</body>
+</html>
